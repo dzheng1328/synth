@@ -144,6 +144,9 @@ const keyboardMap = {
 // Initialize synthesizer
 const synth = new Synthesizer();
 
+// Current octave (default is 3, which gives us middle C around 261Hz)
+let currentOctave = 3;
+
 // Create keyboard UI with proper black key positions
 function createKeyboard() {
     const keyboard = document.getElementById('keyboard');
@@ -224,7 +227,9 @@ function createKeyboard() {
 function playNoteByName(noteName) {
     const frequency = noteFrequencies[noteName];
     if (frequency) {
-        synth.playNote(frequency);
+        // Transpose by octave (each octave doubles or halves the frequency)
+        const transposedFreq = frequency * Math.pow(2, currentOctave - 3);
+        synth.playNote(transposedFreq);
     }
 }
 
@@ -232,7 +237,8 @@ function playNoteByName(noteName) {
 function stopNoteByName(noteName) {
     const frequency = noteFrequencies[noteName];
     if (frequency) {
-        synth.stopNote(frequency);
+        const transposedFreq = frequency * Math.pow(2, currentOctave - 3);
+        synth.stopNote(transposedFreq);
     }
 }
 
@@ -371,3 +377,41 @@ new KnobController(
 
 // Initialize keyboard on load
 createKeyboard();
+
+// Octave controls
+const octaveDisplay = document.getElementById('octave-value');
+const octaveUpBtn = document.getElementById('octave-up');
+const octaveDownBtn = document.getElementById('octave-down');
+
+function updateOctaveDisplay() {
+    octaveDisplay.textContent = currentOctave;
+}
+
+octaveUpBtn.addEventListener('click', () => {
+    if (currentOctave < 7) {
+        currentOctave++;
+        updateOctaveDisplay();
+    }
+});
+
+octaveDownBtn.addEventListener('click', () => {
+    if (currentOctave > 0) {
+        currentOctave--;
+        updateOctaveDisplay();
+    }
+});
+
+// Keyboard shortcuts for octave (Z and X keys)
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'z' || e.key === 'Z') {
+        if (currentOctave > 0) {
+            currentOctave--;
+            updateOctaveDisplay();
+        }
+    } else if (e.key === 'x' || e.key === 'X') {
+        if (currentOctave < 7) {
+            currentOctave++;
+            updateOctaveDisplay();
+        }
+    }
+});
