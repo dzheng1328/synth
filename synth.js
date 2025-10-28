@@ -144,35 +144,79 @@ const keyboardMap = {
 // Initialize synthesizer
 const synth = new Synthesizer();
 
-// Create keyboard UI
+// Create keyboard UI with proper black key positions
 function createKeyboard() {
     const keyboard = document.getElementById('keyboard');
-    const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B', 'C5'];
-    const keys = ['A', 'W', 'S', 'E', 'D', 'F', 'T', 'G', 'Y', 'H', 'U', 'J', 'K'];
     
-    notes.forEach((note, index) => {
-        const keyElement = document.createElement('div');
-        keyElement.className = note.includes('#') ? 'key black' : 'key';
-        keyElement.dataset.note = note;
-        keyElement.innerHTML = `<span>${keys[index]}</span>`;
+    // Piano layout: C C# D D# E F F# G G# A A# B C
+    // Black keys only between: C-D, D-E, F-G, G-A, A-B
+    const layout = [
+        { note: 'C', key: 'A', hasBlack: true, blackNote: 'C#', blackKey: 'W' },
+        { note: 'D', key: 'S', hasBlack: true, blackNote: 'D#', blackKey: 'E' },
+        { note: 'E', key: 'D', hasBlack: false },
+        { note: 'F', key: 'F', hasBlack: true, blackNote: 'F#', blackKey: 'T' },
+        { note: 'G', key: 'G', hasBlack: true, blackNote: 'G#', blackKey: 'Y' },
+        { note: 'A', key: 'H', hasBlack: true, blackNote: 'A#', blackKey: 'U' },
+        { note: 'B', key: 'J', hasBlack: false },
+        { note: 'C5', key: 'K', hasBlack: false }
+    ];
+    
+    layout.forEach(item => {
+        const container = document.createElement('div');
+        container.className = 'key-container';
         
-        // Mouse events
-        keyElement.addEventListener('mousedown', () => {
-            playNoteByName(note);
-            keyElement.classList.add('active');
+        // Create white key
+        const whiteKey = document.createElement('div');
+        whiteKey.className = 'key';
+        whiteKey.dataset.note = item.note;
+        whiteKey.innerHTML = `<span>${item.key}</span>`;
+        
+        // Mouse events for white key
+        whiteKey.addEventListener('mousedown', () => {
+            playNoteByName(item.note);
+            whiteKey.classList.add('active');
         });
         
-        keyElement.addEventListener('mouseup', () => {
-            stopNoteByName(note);
-            keyElement.classList.remove('active');
+        whiteKey.addEventListener('mouseup', () => {
+            stopNoteByName(item.note);
+            whiteKey.classList.remove('active');
         });
         
-        keyElement.addEventListener('mouseleave', () => {
-            stopNoteByName(note);
-            keyElement.classList.remove('active');
+        whiteKey.addEventListener('mouseleave', () => {
+            stopNoteByName(item.note);
+            whiteKey.classList.remove('active');
         });
         
-        keyboard.appendChild(keyElement);
+        container.appendChild(whiteKey);
+        
+        // Create black key if needed
+        if (item.hasBlack) {
+            const blackKey = document.createElement('div');
+            blackKey.className = 'key black';
+            blackKey.dataset.note = item.blackNote;
+            blackKey.innerHTML = `<span>${item.blackKey}</span>`;
+            
+            // Mouse events for black key
+            blackKey.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+                playNoteByName(item.blackNote);
+                blackKey.classList.add('active');
+            });
+            
+            blackKey.addEventListener('mouseup', () => {
+                stopNoteByName(item.blackNote);
+                blackKey.classList.remove('active');
+            });
+            
+            blackKey.addEventListener('mouseleave', () => {
+                stopNoteByName(item.blackNote);
+                blackKey.classList.remove('active');
+            });
+            
+            container.appendChild(blackKey);
+        }
+        
+        keyboard.appendChild(container);
     });
 }
 
@@ -218,34 +262,112 @@ document.addEventListener('keyup', (e) => {
     }
 });
 
-// Settings controls
-document.getElementById('waveform').addEventListener('change', (e) => {
-    synth.updateSettings('waveform', e.target.value);
-});
+// Rotary Knob Controller
+class KnobController {
+    constructor(element, min, max, initialValue, onChange) {
+        this.element = element;
+        this.min = min;
+        this.max = max;
+        this.value = initialValue;
+        this.onChange = onChange;
+        this.isDragging = false;
+        this.startY = 0;
+        this.startValue = 0;
+        
+        this.init();
+    }
+    
+    init() {
+        this.updateIndicator();
+        
+        this.element.addEventListener('mousedown', (e) => {
+            this.isDragging = true;
+            this.startY = e.clientY;
+            this.startValue = this.value;
+            e.preventDefault();
+        });
+        
+        document.addEventListener('mousemove', (e) => {
+            if (!this.isDragging) return;
+            
+            const delta = this.startY - e.clientY;
+            const range = this.max - this.min;
+            const newValue = Math.max(this.min, Math.min(this.max, this.startValue + (delta / 100) * range));
+            
+            this.setValue(newValue);
+        });
+        
+        document.addEventListener('mouseup', () => {
+            this.isDragging = false;
+        });
+    }
+    
+    setValue(value) {
+        this.value = value;
+        this.updateIndicator();
+        this.onChange(value);
+    }
+    
+    updateIndicator() {
+        const indicator = this.element.querySelector('.knob-indicator');
+        const range = this.max - this.min;
+        const normalized = (this.value - this.min) / range;
+        const degrees = -135 + (normalized * 270); // -135 to +135 degrees
+        indicator.style.transform = `translateX(-50%) rotate(${degrees}deg)`;
+    }
+}
 
-document.getElementById('volume').addEventListener('input', (e) => {
-    const value = e.target.value / 100;
-    synth.updateSettings('volume', value);
-    document.getElementById('volume-value').textContent = `${e.target.value}%`;
-});
+// Waveform knob (discrete values)
+const waveforms = ['sine', 'square', 'sawtooth', 'triangle'];
+const waveformLabels = ['SINE', 'SQR', 'SAW', 'TRI'];
+const waveDisplay = document.getElementById('wave-display');
 
-document.getElementById('attack').addEventListener('input', (e) => {
-    const value = e.target.value / 1000;
-    synth.updateSettings('attack', value);
-    document.getElementById('attack-value').textContent = `${e.target.value}ms`;
-});
+new KnobController(
+    document.getElementById('waveform-knob'),
+    0, 3, 2,
+    (value) => {
+        const index = Math.round(value);
+        synth.updateSettings('waveform', waveforms[index]);
+        waveDisplay.textContent = waveformLabels[index];
+    }
+);
 
-document.getElementById('release').addEventListener('input', (e) => {
-    const value = e.target.value / 1000;
-    synth.updateSettings('release', value);
-    document.getElementById('release-value').textContent = `${e.target.value}ms`;
-});
+// Volume knob
+new KnobController(
+    document.getElementById('volume-knob'),
+    0, 100, 50,
+    (value) => {
+        synth.updateSettings('volume', value / 100);
+    }
+);
 
-document.getElementById('filter').addEventListener('input', (e) => {
-    const value = parseInt(e.target.value);
-    synth.updateSettings('filterFrequency', value);
-    document.getElementById('filter-value').textContent = `${value}Hz`;
-});
+// Attack knob
+new KnobController(
+    document.getElementById('attack-knob'),
+    0, 100, 5,
+    (value) => {
+        synth.updateSettings('attack', value / 1000);
+    }
+);
+
+// Release knob
+new KnobController(
+    document.getElementById('release-knob'),
+    0, 200, 30,
+    (value) => {
+        synth.updateSettings('release', value / 100);
+    }
+);
+
+// Filter knob
+new KnobController(
+    document.getElementById('filter-knob'),
+    0, 100, 50,
+    (value) => {
+        const freq = 100 + (value / 100) * 9900; // 100Hz to 10kHz
+        synth.updateSettings('filterFrequency', freq);
+    }
+);
 
 // Initialize keyboard on load
 createKeyboard();
