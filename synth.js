@@ -107,38 +107,18 @@ class Synthesizer {
     }
 }
 
-// Note frequencies (A4 = 440Hz)
+// Note frequencies (C3 to C5 - 3 octaves)
 const noteFrequencies = {
-    'C': 261.63,
-    'C#': 277.18,
-    'D': 293.66,
-    'D#': 311.13,
-    'E': 329.63,
-    'F': 349.23,
-    'F#': 369.99,
-    'G': 392.00,
-    'G#': 415.30,
-    'A': 440.00,
-    'A#': 466.16,
-    'B': 493.88,
+    'C3': 130.81, 'C#3': 138.59, 'D3': 146.83, 'D#3': 155.56, 'E3': 164.81, 'F3': 174.61, 'F#3': 185.00, 'G3': 196.00, 'G#3': 207.65, 'A3': 220.00, 'A#3': 233.08, 'B3': 246.94,
+    'C4': 261.63, 'C#4': 277.18, 'D4': 293.66, 'D#4': 311.13, 'E4': 329.63, 'F4': 349.23, 'F#4': 369.99, 'G4': 392.00, 'G#4': 415.30, 'A4': 440.00, 'A#4': 466.16, 'B4': 493.88,
     'C5': 523.25
 };
 
-// Keyboard mapping
+// Keyboard mapping for 2+ octaves
 const keyboardMap = {
-    'a': 'C',
-    'w': 'C#',
-    's': 'D',
-    'e': 'D#',
-    'd': 'E',
-    'f': 'F',
-    't': 'F#',
-    'g': 'G',
-    'y': 'G#',
-    'h': 'A',
-    'u': 'A#',
-    'j': 'B',
-    'k': 'C5'
+    'z': 'C3', 's': 'C#3', 'x': 'D3', 'd': 'D#3', 'c': 'E3', 'v': 'F3', 'g': 'F#3', 'b': 'G3', 'h': 'G#3', 'n': 'A3', 'j': 'A#3', 'm': 'B3',
+    'q': 'C4', '2': 'C#4', 'w': 'D4', '3': 'D#4', 'e': 'E4', 'r': 'F4', '5': 'F#4', 't': 'G4', '6': 'G#4', 'y': 'A4', '7': 'A#4', 'u': 'B4',
+    'i': 'C5'
 };
 
 // Initialize synthesizer
@@ -151,17 +131,26 @@ let currentOctave = 3;
 function createKeyboard() {
     const keyboard = document.getElementById('keyboard');
     
-    // Piano layout: C C# D D# E F F# G G# A A# B C
-    // Black keys only between: C-D, D-E, F-G, G-A, A-B
+    // Piano layout for 2+ octaves: C3 to C5
     const layout = [
-        { note: 'C', key: 'A', hasBlack: true, blackNote: 'C#', blackKey: 'W' },
-        { note: 'D', key: 'S', hasBlack: true, blackNote: 'D#', blackKey: 'E' },
-        { note: 'E', key: 'D', hasBlack: false },
-        { note: 'F', key: 'F', hasBlack: true, blackNote: 'F#', blackKey: 'T' },
-        { note: 'G', key: 'G', hasBlack: true, blackNote: 'G#', blackKey: 'Y' },
-        { note: 'A', key: 'H', hasBlack: true, blackNote: 'A#', blackKey: 'U' },
-        { note: 'B', key: 'J', hasBlack: false },
-        { note: 'C5', key: 'K', hasBlack: false }
+        // Octave 3 (lower)
+        { note: 'C3', key: 'Z', hasBlack: true, blackNote: 'C#3', blackKey: 'S' },
+        { note: 'D3', key: 'X', hasBlack: true, blackNote: 'D#3', blackKey: 'D' },
+        { note: 'E3', key: 'C', hasBlack: false },
+        { note: 'F3', key: 'V', hasBlack: true, blackNote: 'F#3', blackKey: 'G' },
+        { note: 'G3', key: 'B', hasBlack: true, blackNote: 'G#3', blackKey: 'H' },
+        { note: 'A3', key: 'N', hasBlack: true, blackNote: 'A#3', blackKey: 'J' },
+        { note: 'B3', key: 'M', hasBlack: false },
+        // Octave 4 (middle)
+        { note: 'C4', key: 'Q', hasBlack: true, blackNote: 'C#4', blackKey: '2' },
+        { note: 'D4', key: 'W', hasBlack: true, blackNote: 'D#4', blackKey: '3' },
+        { note: 'E4', key: 'E', hasBlack: false },
+        { note: 'F4', key: 'R', hasBlack: true, blackNote: 'F#4', blackKey: '5' },
+        { note: 'G4', key: 'T', hasBlack: true, blackNote: 'G#4', blackKey: '6' },
+        { note: 'A4', key: 'Y', hasBlack: true, blackNote: 'A#4', blackKey: '7' },
+        { note: 'B4', key: 'U', hasBlack: false },
+        // High C
+        { note: 'C5', key: 'I', hasBlack: false }
     ];
     
     layout.forEach(item => {
