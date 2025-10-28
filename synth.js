@@ -390,14 +390,14 @@ octaveDownBtn.addEventListener('click', () => {
     }
 });
 
-// Keyboard shortcuts for octave (Z and X keys)
+// Keyboard shortcuts for octave ([ and ] keys)
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'z' || e.key === 'Z') {
+    if (e.key === '[') {
         if (currentOctave > 0) {
             currentOctave--;
             updateOctaveDisplay();
         }
-    } else if (e.key === 'x' || e.key === 'X') {
+    } else if (e.key === ']') {
         if (currentOctave < 7) {
             currentOctave++;
             updateOctaveDisplay();
