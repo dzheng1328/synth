@@ -1,22 +1,23 @@
-// Synthesizer Engine
+// Synthesizer Engine Wrapper (uses AdvancedSynthesizer)
 class Synthesizer {
     constructor() {
-        // Create audio context
-        this.audioContext = null;
-        this.masterGain = null;
-        this.filter = null;
+        // Create polyphonic engine
+        this.engine = null;
         
-        // Active notes tracking
-        this.activeNotes = new Map();
-        
-        // Settings
+        // Settings (maintained for compatibility)
         this.settings = {
             waveform: 'sawtooth',
             volume: 0.5,
             attack: 0.05,
+            decay: 0.1,
+            sustain: 0.7,
             release: 0.3,
-            filterFrequency: 5000
+            filterFrequency: 5000,
+            resonance: 1
         };
+        
+        // Track active notes by frequency for compatibility
+        this.activeNotes = new Map();
         
         // Initialize audio on user interaction
         this.initialized = false;
@@ -25,22 +26,20 @@ class Synthesizer {
     init() {
         if (this.initialized) return;
         
-        // Create audio context
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // Create the advanced polyphonic engine
+        this.engine = new AdvancedSynthesizer();
         
-        // Create master gain (volume control)
-        this.masterGain = this.audioContext.createGain();
-        this.masterGain.gain.value = this.settings.volume;
-        
-        // Create filter
-        this.filter = this.audioContext.createBiquadFilter();
-        this.filter.type = 'lowpass';
-        this.filter.frequency.value = this.settings.filterFrequency;
-        this.filter.Q.value = 1;
-        
-        // Connect filter -> master gain -> destination
-        this.filter.connect(this.masterGain);
-        this.masterGain.connect(this.audioContext.destination);
+        // Apply initial settings
+        this.engine.setWaveform(this.settings.waveform);
+        this.engine.setVolume(this.settings.volume);
+        this.engine.setFilterCutoff(this.settings.filterFrequency);
+        this.engine.setFilterResonance(this.settings.resonance);
+        this.engine.updateEnvelope('amp', {
+            attack: this.settings.attack,
+            decay: this.settings.decay,
+            sustain: this.settings.sustain,
+            release: this.settings.release
+        });
         
         this.initialized = true;
     }
@@ -48,30 +47,14 @@ class Synthesizer {
     playNote(frequency, velocity = 1) {
         if (!this.initialized) this.init();
         
-        const now = this.audioContext.currentTime;
+        // Convert frequency to MIDI note number
+        const midiNote = this.frequencyToMidi(frequency);
         
-        // Create oscillator
-        const oscillator = this.audioContext.createOscillator();
-        oscillator.type = this.settings.waveform;
-        oscillator.frequency.value = frequency;
+        // Play note on engine
+        this.engine.noteOn(midiNote, frequency, velocity);
         
-        // Create gain node for this note (for envelope)
-        const noteGain = this.audioContext.createGain();
-        noteGain.gain.value = 0;
-        
-        // Connect: oscillator -> note gain -> filter
-        oscillator.connect(noteGain);
-        noteGain.connect(this.filter);
-        
-        // Apply attack envelope
-        noteGain.gain.setValueAtTime(0, now);
-        noteGain.gain.linearRampToValueAtTime(velocity, now + this.settings.attack);
-        
-        // Start oscillator
-        oscillator.start(now);
-        
-        // Store active note
-        this.activeNotes.set(frequency, { oscillator, noteGain });
+        // Track for compatibility
+        this.activeNotes.set(frequency, midiNote);
         
         return frequency;
     }
@@ -79,31 +62,56 @@ class Synthesizer {
     stopNote(frequency) {
         if (!this.activeNotes.has(frequency)) return;
         
-        const { oscillator, noteGain } = this.activeNotes.get(frequency);
-        const now = this.audioContext.currentTime;
+        const midiNote = this.activeNotes.get(frequency);
+        this.engine.noteOff(midiNote);
         
-        // Apply release envelope
-        noteGain.gain.cancelScheduledValues(now);
-        noteGain.gain.setValueAtTime(noteGain.gain.value, now);
-        noteGain.gain.linearRampToValueAtTime(0, now + this.settings.release);
-        
-        // Stop oscillator after release
-        oscillator.stop(now + this.settings.release);
-        
-        // Clean up
+        // Clean up tracking
         this.activeNotes.delete(frequency);
     }
     
     updateSettings(setting, value) {
+        if (!this.initialized) this.init();
+        
         this.settings[setting] = value;
         
-        // Update real-time parameters
-        if (setting === 'volume' && this.masterGain) {
-            this.masterGain.gain.value = value;
+        // Map settings to engine methods
+        switch(setting) {
+            case 'waveform':
+                this.engine.setWaveform(value);
+                break;
+            case 'volume':
+                this.engine.setVolume(value);
+                break;
+            case 'attack':
+                this.engine.updateEnvelope('amp', { attack: value });
+                break;
+            case 'decay':
+                this.engine.updateEnvelope('amp', { decay: value });
+                break;
+            case 'sustain':
+                this.engine.updateEnvelope('amp', { sustain: value });
+                break;
+            case 'release':
+                this.engine.updateEnvelope('amp', { release: value });
+                break;
+            case 'filterFrequency':
+                this.engine.setFilterCutoff(value);
+                break;
+            case 'resonance':
+                this.engine.setFilterResonance(value);
+                break;
         }
-        if (setting === 'filterFrequency' && this.filter) {
-            this.filter.frequency.value = value;
-        }
+    }
+    
+    // Helper: Convert frequency to MIDI note number
+    frequencyToMidi(frequency) {
+        return Math.round(69 + 12 * Math.log2(frequency / 440));
+    }
+    
+    // Expose engine for direct access if needed
+    getEngine() {
+        if (!this.initialized) this.init();
+        return this.engine;
     }
 }
 
@@ -343,25 +351,25 @@ window.knobControllers.volume = new KnobController(
     }
 );
 
-// Attack knob
+// Attack knob (0-1000ms)
 window.knobControllers.attack = new KnobController(
     document.getElementById('attack-knob'),
     0, 100, 5,
     (value) => {
-        synth.updateSettings('attack', value / 1000);
+        synth.updateSettings('attack', value / 1000); // Convert to seconds
     }
 );
 
-// Release knob
+// Release knob (0-2s)
 window.knobControllers.release = new KnobController(
     document.getElementById('release-knob'),
     0, 200, 30,
     (value) => {
-        synth.updateSettings('release', value / 100);
+        synth.updateSettings('release', value / 100); // Convert to seconds
     }
 );
 
-// Filter knob
+// Filter knob (100Hz to 10kHz)
 window.knobControllers.filter = new KnobController(
     document.getElementById('filter-knob'),
     0, 100, 50,
