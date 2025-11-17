@@ -164,6 +164,139 @@
             </div>
         </div>
 
+        <!-- Performance Controls -->
+        <div class="performance-section">
+            <!-- Transport Controls -->
+            <div class="transport-panel">
+                <div class="transport-title">TRANSPORT</div>
+                <div class="transport-controls">
+                    <button id="play-stop-btn" class="transport-btn" title="Play/Stop (Space)">
+                        <span class="icon">▶</span>
+                        <span class="label">PLAY</span>
+                    </button>
+                    <button id="tap-tempo-btn" class="transport-btn" title="Tap Tempo (T)">
+                        <span class="icon">⊙</span>
+                        <span class="label">TAP</span>
+                    </button>
+                    <div class="bpm-display">
+                        <div class="bpm-value" id="bpm-value">120</div>
+                        <div class="bpm-label">BPM</div>
+                    </div>
+                    <div class="clock-indicator" id="clock-indicator">
+                        <div class="pulse"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Arpeggiator Panel -->
+            <div class="arp-panel">
+                <div class="panel-header">
+                    <div class="panel-title">ARPEGGIATOR</div>
+                    <button id="arp-enable-btn" class="enable-btn" title="Enable Arpeggiator (A)">
+                        <span class="led" id="arp-led"></span>
+                        <span class="label">ON</span>
+                    </button>
+                </div>
+                <div class="arp-controls">
+                    <div class="pattern-selector">
+                        <label>PATTERN</label>
+                        <div class="button-group">
+                            <button class="pattern-btn active" data-pattern="up">UP</button>
+                            <button class="pattern-btn" data-pattern="down">DOWN</button>
+                            <button class="pattern-btn" data-pattern="up-down">UP/DN</button>
+                            <button class="pattern-btn" data-pattern="random">RAND</button>
+                            <button class="pattern-btn" data-pattern="played">PLAY</button>
+                        </div>
+                    </div>
+                    <div class="arp-knobs">
+                        <div class="knob-group">
+                            <div class="knob small" id="arp-rate-knob" data-value="50">
+                                <div class="knob-indicator"></div>
+                            </div>
+                            <label>RATE</label>
+                            <div class="value-display" id="arp-rate-display">1/16</div>
+                        </div>
+                        <div class="knob-group">
+                            <div class="knob small" id="arp-octaves-knob" data-value="0">
+                                <div class="knob-indicator"></div>
+                            </div>
+                            <label>OCTAVES</label>
+                            <div class="value-display" id="arp-octaves-display">1</div>
+                        </div>
+                        <div class="knob-group">
+                            <div class="knob small" id="arp-gate-knob" data-value="75">
+                                <div class="knob-indicator"></div>
+                            </div>
+                            <label>GATE</label>
+                            <div class="value-display" id="arp-gate-display">75%</div>
+                        </div>
+                    </div>
+                    <div class="arp-options">
+                        <button id="arp-latch-btn" class="option-btn" title="Latch Mode">
+                            <span class="led" id="arp-latch-led"></span>
+                            <span class="label">LATCH</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loop Delay Panel -->
+            <div class="delay-panel">
+                <div class="panel-header">
+                    <div class="panel-title">LOOP DELAY</div>
+                    <button id="delay-enable-btn" class="enable-btn" title="Enable Delay">
+                        <span class="led" id="delay-led"></span>
+                        <span class="label">ON</span>
+                    </button>
+                </div>
+                <div class="delay-controls">
+                    <div class="delay-knobs">
+                        <div class="knob-group">
+                            <div class="knob small" id="delay-time-knob" data-value="50">
+                                <div class="knob-indicator"></div>
+                            </div>
+                            <label>TIME</label>
+                            <div class="value-display" id="delay-time-display">500ms</div>
+                        </div>
+                        <div class="knob-group">
+                            <div class="knob small" id="delay-feedback-knob" data-value="60">
+                                <div class="knob-indicator"></div>
+                            </div>
+                            <label>FEEDBACK</label>
+                            <div class="value-display" id="delay-feedback-display">60%</div>
+                        </div>
+                        <div class="knob-group">
+                            <div class="knob small" id="delay-filter-knob" data-value="100">
+                                <div class="knob-indicator"></div>
+                            </div>
+                            <label>FILTER</label>
+                            <div class="value-display" id="delay-filter-display">20kHz</div>
+                        </div>
+                        <div class="knob-group">
+                            <div class="knob small" id="delay-mix-knob" data-value="30">
+                                <div class="knob-indicator"></div>
+                            </div>
+                            <label>MIX</label>
+                            <div class="value-display" id="delay-mix-display">30%</div>
+                        </div>
+                    </div>
+                    <div class="delay-options">
+                        <button id="delay-freeze-btn" class="freeze-btn" title="Freeze Delay">
+                            <span class="led freeze" id="delay-freeze-led"></span>
+                            <span class="label">FREEZE</span>
+                        </button>
+                        <button id="delay-sync-btn" class="option-btn" title="Tempo Sync">
+                            <span class="led" id="delay-sync-led"></span>
+                            <span class="label">SYNC</span>
+                        </button>
+                        <button id="delay-clear-btn" class="option-btn" title="Clear Delay">
+                            <span class="label">CLEAR</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="keyboard" id="keyboard">
             <!-- Keys will be generated by JavaScript -->
         </div>
@@ -176,6 +309,7 @@
     <script src="advanced-engine.js"></script>
     <script src="performance-features.js"></script>
     <script src="synth.js"></script>
+    <script src="performance-ui.js"></script>
     <script>
         // Initialize systems when DOM is ready
         document.addEventListener('DOMContentLoaded', () => {
@@ -213,6 +347,11 @@
             // Export for global access
             window.projectManager = projectManager;
             window.projectUI = projectUI;
+            
+            // Initialize performance controls after a short delay to ensure synth is ready
+            setTimeout(() => {
+                initPerformanceControls();
+            }, 100);
         });
     </script>
     

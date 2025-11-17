@@ -1187,3 +1187,373 @@ body {
         width: 100%;
     }
 }
+
+/* ==================== PERFORMANCE CONTROLS ==================== */
+
+.performance-section {
+    display: flex;
+    gap: 20px;
+    padding: 20px;
+    background: linear-gradient(145deg, #2a2a2a, #1f1f1f);
+    border: 3px solid #0a0a0a;
+    border-radius: 8px;
+    margin: 20px 0;
+    box-shadow: 
+        inset 0 2px 10px rgba(0,0,0,0.5),
+        0 4px 12px rgba(0,0,0,0.6);
+}
+
+/* Transport Panel */
+.transport-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 15px;
+    background: linear-gradient(145deg, #252525, #1a1a1a);
+    border: 2px solid #0a0a0a;
+    border-radius: 6px;
+    min-width: 200px;
+}
+
+.transport-title {
+    color: #ff4400;
+    font-size: 12px;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 5px;
+    letter-spacing: 2px;
+}
+
+.transport-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.transport-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 10px 15px;
+    background: linear-gradient(145deg, #333, #222);
+    border: 2px solid #444;
+    border-radius: 6px;
+    color: #ff4400;
+    font-size: 10px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.1s;
+    min-width: 60px;
+}
+
+.transport-btn:hover {
+    background: linear-gradient(145deg, #3a3a3a, #282828);
+    border-color: #555;
+    transform: translateY(-1px);
+}
+
+.transport-btn:active {
+    transform: translateY(1px);
+    box-shadow: inset 0 2px 5px rgba(0,0,0,0.5);
+}
+
+.transport-btn.playing {
+    background: linear-gradient(145deg, #ff4400, #cc3300);
+    border-color: #ff6600;
+    color: #fff;
+}
+
+.transport-btn .icon {
+    font-size: 18px;
+}
+
+.transport-btn .label {
+    font-size: 9px;
+    letter-spacing: 1px;
+}
+
+.bpm-display {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 8px 12px;
+    background: #000;
+    border: 2px solid #333;
+    border-radius: 4px;
+}
+
+.bpm-value {
+    color: #00ff00;
+    font-size: 20px;
+    font-weight: bold;
+    font-family: 'Courier New', monospace;
+    line-height: 1;
+}
+
+.bpm-label {
+    color: #666;
+    font-size: 8px;
+    margin-top: 2px;
+    letter-spacing: 1px;
+}
+
+.clock-indicator {
+    width: 30px;
+    height: 30px;
+    background: #000;
+    border: 2px solid #333;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.clock-indicator .pulse {
+    width: 16px;
+    height: 16px;
+    background: #333;
+    border-radius: 50%;
+    transition: all 0.05s;
+}
+
+.clock-indicator.active .pulse {
+    background: #00ff00;
+    box-shadow: 0 0 10px #00ff00;
+}
+
+/* Arpeggiator Panel */
+.arp-panel, .delay-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 15px;
+    background: linear-gradient(145deg, #252525, #1a1a1a);
+    border: 2px solid #0a0a0a;
+    border-radius: 6px;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.panel-title {
+    color: #ff4400;
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+
+.enable-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: linear-gradient(145deg, #333, #222);
+    border: 2px solid #444;
+    border-radius: 4px;
+    color: #888;
+    font-size: 10px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+
+.enable-btn:hover {
+    background: linear-gradient(145deg, #3a3a3a, #282828);
+    border-color: #555;
+}
+
+.enable-btn.active {
+    background: linear-gradient(145deg, #00cc00, #009900);
+    border-color: #00ff00;
+    color: #fff;
+}
+
+.led {
+    width: 8px;
+    height: 8px;
+    background: #333;
+    border-radius: 50%;
+    border: 1px solid #222;
+    transition: all 0.1s;
+}
+
+.enable-btn.active .led,
+.option-btn.active .led {
+    background: #00ff00;
+    box-shadow: 0 0 8px #00ff00, inset 0 0 4px rgba(255,255,255,0.3);
+}
+
+.led.freeze {
+    background: #333;
+}
+
+.freeze-btn.active .led.freeze {
+    background: #ff4400;
+    box-shadow: 0 0 8px #ff4400, inset 0 0 4px rgba(255,255,255,0.3);
+}
+
+/* Arpeggiator Controls */
+.arp-controls, .delay-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.pattern-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.pattern-selector label {
+    color: #888;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+.button-group {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.pattern-btn {
+    flex: 1;
+    min-width: 45px;
+    padding: 8px 10px;
+    background: linear-gradient(145deg, #333, #222);
+    border: 2px solid #444;
+    border-radius: 4px;
+    color: #888;
+    font-size: 9px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+
+.pattern-btn:hover {
+    background: linear-gradient(145deg, #3a3a3a, #282828);
+    border-color: #555;
+}
+
+.pattern-btn.active {
+    background: linear-gradient(145deg, #ff4400, #cc3300);
+    border-color: #ff6600;
+    color: #fff;
+}
+
+.arp-knobs, .delay-knobs {
+    display: flex;
+    gap: 15px;
+    justify-content: space-around;
+}
+
+.knob.small {
+    width: 50px;
+    height: 50px;
+}
+
+.value-display {
+    color: #00ff00;
+    font-size: 10px;
+    font-family: 'Courier New', monospace;
+    text-align: center;
+    margin-top: 5px;
+    min-height: 12px;
+}
+
+.arp-options, .delay-options {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.option-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: linear-gradient(145deg, #333, #222);
+    border: 2px solid #444;
+    border-radius: 4px;
+    color: #888;
+    font-size: 10px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+
+.option-btn:hover {
+    background: linear-gradient(145deg, #3a3a3a, #282828);
+    border-color: #555;
+}
+
+.option-btn.active {
+    background: linear-gradient(145deg, #ff4400, #cc3300);
+    border-color: #ff6600;
+    color: #fff;
+}
+
+.freeze-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: linear-gradient(145deg, #333, #222);
+    border: 2px solid #444;
+    border-radius: 4px;
+    color: #888;
+    font-size: 11px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+
+.freeze-btn:hover {
+    background: linear-gradient(145deg, #3a3a3a, #282828);
+    border-color: #555;
+}
+
+.freeze-btn.active {
+    background: linear-gradient(145deg, #ff4400, #cc3300);
+    border-color: #ff6600;
+    color: #fff;
+    animation: pulse-freeze 1s infinite;
+}
+
+@keyframes pulse-freeze {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+/* Responsive adjustments for performance section */
+@media (max-width: 1200px) {
+    .performance-section {
+        flex-direction: column;
+    }
+    
+    .transport-panel {
+        width: 100%;
+    }
+}
+
+@media (max-width: 768px) {
+    .arp-knobs, .delay-knobs {
+        gap: 10px;
+    }
+    
+    .knob.small {
+        width: 40px;
+        height: 40px;
+    }
+}
