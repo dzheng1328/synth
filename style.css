@@ -181,6 +181,320 @@ body {
     color: #aaa;
 }
 
+/* File Menu Bar */
+.file-menu-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(145deg, #2a2a2a, #1f1f1f);
+    border-bottom: 2px solid #0a0a0a;
+    padding: 8px 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 90;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+}
+
+.file-menu-left {
+    display: flex;
+    gap: 5px;
+}
+
+.menu-btn {
+    padding: 6px 12px;
+    background: #1a1a1a;
+    border: 1px solid #0a0a0a;
+    border-radius: 3px;
+    color: #aaa;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.menu-btn:hover {
+    background: #2a2a2a;
+    color: #fff;
+    border-color: #ff4400;
+}
+
+.menu-btn:active {
+    transform: translateY(1px);
+}
+
+.project-name-display {
+    color: #ff4400;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 6px 12px;
+}
+
+/* Notification Toast */
+.notification {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: linear-gradient(145deg, #2a2a2a, #1f1f1f);
+    border: 2px solid #0a0a0a;
+    border-radius: 5px;
+    padding: 12px 20px;
+    color: #fff;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+    z-index: 1001;
+    animation: slideIn 0.3s ease;
+}
+
+.notification-success {
+    border-left: 4px solid #4caf50;
+}
+
+.notification-error {
+    border-left: 4px solid #f44336;
+}
+
+.notification-info {
+    border-left: 4px solid #ff4400;
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateX(400px);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+/* Dialog Overlays */
+.dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    backdrop-filter: blur(5px);
+}
+
+.dialog-content {
+    background: linear-gradient(145deg, #2a2a2a, #1f1f1f);
+    border: 3px solid #0a0a0a;
+    border-radius: 8px;
+    padding: 30px;
+    max-width: 600px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 
+        inset 0 2px 10px rgba(0,0,0,0.5),
+        0 10px 30px rgba(0,0,0,0.8);
+}
+
+.dialog-small {
+    max-width: 400px;
+}
+
+.dialog-content h2 {
+    color: #ff4400;
+    margin-bottom: 20px;
+    font-size: 20px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+}
+
+.dialog-section {
+    margin-bottom: 20px;
+}
+
+.dialog-section label {
+    display: block;
+    color: #888;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+.dialog-section input[type="text"] {
+    width: 100%;
+    padding: 10px;
+    background: #1a1a1a;
+    border: 2px solid #0a0a0a;
+    border-radius: 5px;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+}
+
+.dialog-section input[type="text"]:focus {
+    outline: none;
+    border-color: #ff4400;
+    box-shadow: 0 0 8px rgba(255, 68, 0, 0.3);
+}
+
+.dialog-buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 25px;
+}
+
+.dialog-btn-primary,
+.dialog-btn-secondary {
+    padding: 10px 20px;
+    border: 2px solid #0a0a0a;
+    border-radius: 5px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    font-weight: bold;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.dialog-btn-primary {
+    background: linear-gradient(145deg, #ff4400, #cc3600);
+    color: #fff;
+}
+
+.dialog-btn-primary:hover {
+    background: linear-gradient(145deg, #ff5522, #dd4411);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.7);
+}
+
+.dialog-btn-secondary {
+    background: #1a1a1a;
+    color: #aaa;
+}
+
+.dialog-btn-secondary:hover {
+    background: #2a2a2a;
+    color: #fff;
+}
+
+/* Template Grid */
+.template-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 15px;
+}
+
+.template-card {
+    background: #1a1a1a;
+    border: 2px solid #0a0a0a;
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.template-card:hover {
+    background: #2a2a2a;
+    border-color: #333;
+    transform: translateY(-2px);
+}
+
+.template-card.selected {
+    border-color: #ff4400;
+    background: #2a2a2a;
+    box-shadow: 0 0 12px rgba(255, 68, 0, 0.3);
+}
+
+.template-icon {
+    font-size: 40px;
+    margin-bottom: 10px;
+}
+
+.template-name {
+    color: #fff;
+    font-size: 13px;
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.template-desc {
+    color: #888;
+    font-size: 10px;
+}
+
+/* Recent Projects List */
+.recent-list {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.no-recent {
+    text-align: center;
+    color: #666;
+    padding: 40px;
+    font-size: 14px;
+}
+
+.recent-project-item {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 15px;
+    background: #1a1a1a;
+    border: 1px solid #0a0a0a;
+    border-radius: 5px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.recent-project-item:hover {
+    background: #2a2a2a;
+    border-color: #ff4400;
+    transform: translateX(5px);
+}
+
+.recent-thumbnail {
+    font-size: 32px;
+    width: 50px;
+    height: 50px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0a0a0a;
+    border-radius: 5px;
+}
+
+.recent-info {
+    flex: 1;
+}
+
+.recent-name {
+    color: #fff;
+    font-size: 14px;
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.recent-meta {
+    color: #666;
+    font-size: 11px;
+    display: flex;
+    gap: 8px;
+}
+
+/* Adjust synth panel for menu bar */
+body {
+    padding-top: 50px;
+}
+
 .synth-panel {
     background: linear-gradient(145deg, #2a2a2a, #1f1f1f);
     border: 3px solid #0a0a0a;

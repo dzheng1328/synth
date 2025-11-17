@@ -299,8 +299,12 @@ class KnobController {
     
     setValue(value) {
         this.value = value;
+        this.element.dataset.value = value;
         this.updateIndicator();
         this.onChange(value);
+        
+        // Emit change event for project management
+        document.dispatchEvent(new CustomEvent('knob-change'));
     }
     
     updateIndicator() {
@@ -317,7 +321,10 @@ const waveforms = ['sine', 'square', 'sawtooth', 'triangle'];
 const waveformLabels = ['SINE', 'SQR', 'SAW', 'TRI'];
 const waveDisplay = document.getElementById('wave-display');
 
-new KnobController(
+// Store knob controllers globally for project management
+window.knobControllers = {};
+
+window.knobControllers.waveform = new KnobController(
     document.getElementById('waveform-knob'),
     0, 3, 2,
     (value) => {
@@ -328,7 +335,7 @@ new KnobController(
 );
 
 // Volume knob
-new KnobController(
+window.knobControllers.volume = new KnobController(
     document.getElementById('volume-knob'),
     0, 100, 50,
     (value) => {
@@ -337,7 +344,7 @@ new KnobController(
 );
 
 // Attack knob
-new KnobController(
+window.knobControllers.attack = new KnobController(
     document.getElementById('attack-knob'),
     0, 100, 5,
     (value) => {
@@ -346,7 +353,7 @@ new KnobController(
 );
 
 // Release knob
-new KnobController(
+window.knobControllers.release = new KnobController(
     document.getElementById('release-knob'),
     0, 200, 30,
     (value) => {
@@ -355,7 +362,7 @@ new KnobController(
 );
 
 // Filter knob
-new KnobController(
+window.knobControllers.filter = new KnobController(
     document.getElementById('filter-knob'),
     0, 100, 50,
     (value) => {
