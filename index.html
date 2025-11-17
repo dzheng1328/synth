@@ -7,6 +7,47 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <!-- Auth Modal -->
+    <div id="auth-modal" class="auth-modal">
+        <div class="auth-modal-content">
+            <!-- Login Form -->
+            <div id="login-container">
+                <h2>Login to Synth</h2>
+                <form id="login-form">
+                    <input type="email" name="email" placeholder="Email" required>
+                    <input type="password" name="password" placeholder="Password" required>
+                    <div id="login-error" class="error-message"></div>
+                    <button type="submit" class="auth-btn">Login</button>
+                </form>
+                <p class="auth-toggle">
+                    Don't have an account? <a href="#" id="show-signup">Sign up</a>
+                </p>
+                <button id="skip-login" class="skip-btn">Continue as Guest</button>
+            </div>
+
+            <!-- Signup Form -->
+            <div id="signup-container" style="display: none;">
+                <h2>Create Account</h2>
+                <form id="signup-form">
+                    <input type="email" name="email" placeholder="Email" required>
+                    <input type="password" name="password" placeholder="Password (min 8 chars)" required minlength="8">
+                    <input type="password" name="confirmPassword" placeholder="Confirm Password" required>
+                    <div id="signup-error" class="error-message"></div>
+                    <button type="submit" class="auth-btn">Sign Up</button>
+                </form>
+                <p class="auth-toggle">
+                    Already have an account? <a href="#" id="show-login">Login</a>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- User Info (shown when logged in) -->
+    <div id="user-info" class="user-info" style="display: none;">
+        <span id="user-email"></span>
+        <button id="logout-btn" class="logout-btn">Logout</button>
+    </div>
+
     <div class="synth-panel">
         <div class="controls-section">
             <div class="knob-group">
@@ -60,6 +101,13 @@
         </div>
     </div>
 
+    <script src="auth.js"></script>
     <script src="synth.js"></script>
+    <script>
+        // Initialize auth UI when DOM is ready
+        document.addEventListener('DOMContentLoaded', () => {
+            authUI.init();
+        });
+    </script>
 </body>
 </html>
