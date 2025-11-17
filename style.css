@@ -1291,6 +1291,20 @@ body {
     font-weight: bold;
     font-family: 'Courier New', monospace;
     line-height: 1;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.bpm-value:hover {
+    color: #00ff88;
+    transform: scale(1.05);
+}
+
+.bpm-value.editing {
+    background: #222;
+    padding: 2px 5px;
+    border-radius: 2px;
+    outline: 2px solid #ff4400;
 }
 
 .bpm-label {
@@ -1322,6 +1336,64 @@ body {
 .clock-indicator.active .pulse {
     background: #00ff00;
     box-shadow: 0 0 10px #00ff00;
+}
+
+/* Voice Meter */
+.voice-meter-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 10px;
+    background: linear-gradient(145deg, #222, #1a1a1a);
+    border: 2px solid #333;
+    border-radius: 6px;
+    min-width: 180px;
+}
+
+.voice-meter-label {
+    color: #ff4400;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+
+.voice-meter {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.voice-led {
+    width: 16px;
+    height: 16px;
+    background: #222;
+    border: 1px solid #111;
+    border-radius: 3px;
+    transition: all 0.1s;
+}
+
+.voice-led.active {
+    background: #00ff00;
+    box-shadow: 0 0 8px #00ff00, inset 0 0 4px rgba(255,255,255,0.3);
+}
+
+.voice-led.stealing {
+    background: #ff4400;
+    box-shadow: 0 0 8px #ff4400;
+    animation: voice-steal-flash 0.3s;
+}
+
+@keyframes voice-steal-flash {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.voice-count {
+    color: #00ff00;
+    font-size: 11px;
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
 }
 
 /* Arpeggiator Panel */

@@ -141,6 +141,20 @@
             </div>
 
             <div class="knob-group">
+                <div class="knob" id="decay-knob" data-value="10">
+                    <div class="knob-indicator"></div>
+                </div>
+                <label>DECAY</label>
+            </div>
+
+            <div class="knob-group">
+                <div class="knob" id="sustain-knob" data-value="70">
+                    <div class="knob-indicator"></div>
+                </div>
+                <label>SUSTAIN</label>
+            </div>
+
+            <div class="knob-group">
                 <div class="knob" id="release-knob" data-value="30">
                     <div class="knob-indicator"></div>
                 </div>
@@ -152,6 +166,13 @@
                     <div class="knob-indicator"></div>
                 </div>
                 <label>FILTER</label>
+            </div>
+
+            <div class="knob-group">
+                <div class="knob" id="resonance-knob" data-value="10">
+                    <div class="knob-indicator"></div>
+                </div>
+                <label>RESONANCE</label>
             </div>
 
             <div class="octave-control">
@@ -179,12 +200,27 @@
                         <span class="label">TAP</span>
                     </button>
                     <div class="bpm-display">
-                        <div class="bpm-value" id="bpm-value">120</div>
+                        <div class="bpm-value" id="bpm-value" title="Click to edit BPM">120</div>
                         <div class="bpm-label">BPM</div>
                     </div>
                     <div class="clock-indicator" id="clock-indicator">
                         <div class="pulse"></div>
                     </div>
+                </div>
+                <!-- Voice Meter -->
+                <div class="voice-meter-container">
+                    <div class="voice-meter-label">VOICES</div>
+                    <div class="voice-meter" id="voice-meter">
+                        <div class="voice-led" data-voice="0"></div>
+                        <div class="voice-led" data-voice="1"></div>
+                        <div class="voice-led" data-voice="2"></div>
+                        <div class="voice-led" data-voice="3"></div>
+                        <div class="voice-led" data-voice="4"></div>
+                        <div class="voice-led" data-voice="5"></div>
+                        <div class="voice-led" data-voice="6"></div>
+                        <div class="voice-led" data-voice="7"></div>
+                    </div>
+                    <div class="voice-count" id="voice-count">0/8</div>
                 </div>
             </div>
 

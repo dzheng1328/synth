@@ -360,6 +360,24 @@ window.knobControllers.attack = new KnobController(
     }
 );
 
+// Decay knob (0-2000ms)
+window.knobControllers.decay = new KnobController(
+    document.getElementById('decay-knob'),
+    0, 100, 10,
+    (value) => {
+        synth.updateSettings('decay', value / 50); // 0-2s
+    }
+);
+
+// Sustain knob (0-100%)
+window.knobControllers.sustain = new KnobController(
+    document.getElementById('sustain-knob'),
+    0, 100, 70,
+    (value) => {
+        synth.updateSettings('sustain', value / 100); // 0-1
+    }
+);
+
 // Release knob (0-2s)
 window.knobControllers.release = new KnobController(
     document.getElementById('release-knob'),
@@ -376,6 +394,16 @@ window.knobControllers.filter = new KnobController(
     (value) => {
         const freq = 100 + (value / 100) * 9900; // 100Hz to 10kHz
         synth.updateSettings('filterFrequency', freq);
+    }
+);
+
+// Resonance knob (0.1 to 20 Q value)
+window.knobControllers.resonance = new KnobController(
+    document.getElementById('resonance-knob'),
+    0, 100, 10,
+    (value) => {
+        const resonance = 0.1 + (value / 100) * 19.9; // 0.1 to 20
+        synth.updateSettings('resonance', resonance);
     }
 );
 

@@ -44,6 +44,7 @@ function initPerformanceControls() {
     initTransportControls();
     initArpeggiatorControls();
     initDelayControls();
+    initVoiceMeter();
     
     // Keyboard shortcuts
     document.addEventListener('keydown', handlePerformanceShortcuts);
@@ -68,6 +69,44 @@ function initTransportControls() {
         if (newBPM) {
             bpmDisplay.textContent = Math.round(newBPM);
         }
+    });
+    
+    // Editable BPM - Click to edit
+    bpmDisplay.addEventListener('click', () => {
+        const currentBPM = parseInt(bpmDisplay.textContent);
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.min = '40';
+        input.max = '240';
+        input.value = currentBPM;
+        input.className = 'bpm-input';
+        input.style.cssText = 'width: 50px; background: #000; color: #00ff00; border: 2px solid #ff4400; padding: 2px 5px; font-size: 20px; font-family: "Courier New", monospace; text-align: center; border-radius: 2px;';
+        
+        bpmDisplay.textContent = '';
+        bpmDisplay.appendChild(input);
+        bpmDisplay.classList.add('editing');
+        input.focus();
+        input.select();
+        
+        const finishEditing = () => {
+            const newBPM = parseInt(input.value);
+            if (newBPM >= 40 && newBPM <= 240) {
+                performanceClock.setBPM(newBPM);
+                bpmDisplay.textContent = newBPM;
+            } else {
+                bpmDisplay.textContent = currentBPM;
+            }
+            bpmDisplay.classList.remove('editing');
+        };
+        
+        input.addEventListener('blur', finishEditing);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') finishEditing();
+            if (e.key === 'Escape') {
+                bpmDisplay.textContent = currentBPM;
+                bpmDisplay.classList.remove('editing');
+            }
+        });
     });
     
     // Clock pulse visualization
@@ -311,6 +350,41 @@ function handlePerformanceShortcuts(e) {
             document.getElementById('arp-latch-btn').click();
             break;
     }
+}
+
+// ============== VOICE METER ==============
+
+function initVoiceMeter() {
+    const voiceMeter = document.getElementById('voice-meter');
+    const voiceCount = document.getElementById('voice-count');
+    const voiceLEDs = voiceMeter.querySelectorAll('.voice-led');
+    
+    // Get the engine and voice allocator
+    const engine = synth.getEngine();
+    const voiceAllocator = engine.voiceAllocator;
+    
+    // Update voice meter display
+    function updateVoiceMeter() {
+        const activeVoices = voiceAllocator.getActiveVoiceCount();
+        
+        // Update LEDs
+        voiceLEDs.forEach((led, index) => {
+            if (index < activeVoices) {
+                led.classList.add('active');
+            } else {
+                led.classList.remove('active');
+            }
+        });
+        
+        // Update counter
+        voiceCount.textContent = `${activeVoices}/8`;
+        
+        // Check again soon
+        requestAnimationFrame(updateVoiceMeter);
+    }
+    
+    // Start monitoring
+    updateVoiceMeter();
 }
 
 // ============== EXPORT ==============

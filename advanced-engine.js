@@ -464,6 +464,11 @@ class VoiceAllocator {
     this.maxVoices = maxVoices;
   }
   
+  // Get active voice count
+  getActiveVoiceCount() {
+    return Array.from(this.activeNotes.values()).filter(voice => voice.isActive).length;
+  }
+  
   // Connect to destination
   connect(destination) {
     this.output.connect(destination);
