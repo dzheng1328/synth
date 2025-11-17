@@ -22,6 +22,16 @@ A browser-based digital synthesizer with retro aesthetic, user authentication, a
   - Low-pass filter with adjustable cutoff
 - **Web Audio API**: Professional-quality audio synthesis
 
+### Project Management
+- **5 Built-in Templates**: Empty, Synth Lead, Bass, Pad, Ambient
+- **Save/Load Projects**: Desktop-style `.synthproj` files (JSON)
+- **Autosave**: Every 30 seconds with crash recovery
+- **Recent Projects**: Last 10 projects with metadata
+- **Export Bundles**: Project export (ZIP coming soon)
+- **Keyboard Shortcuts**: `Ctrl+N/O/S` for New/Open/Save
+- **Change Tracking**: Visual indicator for unsaved changes
+- **Git-Friendly Format**: Human-readable JSON for version control
+
 ### User System
 - **Authentication**: Email/password signup and login
 - **Guest Mode**: Use synth without creating account
@@ -32,6 +42,8 @@ A browser-based digital synthesizer with retro aesthetic, user authentication, a
 - **Retro Aesthetic**: Dark metal panel with vintage synth styling
 - **Physical Controls**: CSS-based rotary knobs with LED indicators
 - **Proper Piano Layout**: Black keys only between C-D, D-E, F-G, G-A, A-B
+- **File Menu Bar**: Persistent file operations at top of screen
+- **Modal Dialogs**: Template chooser, recent projects, autosave recovery
 
 ## Quick Start
 
@@ -80,34 +92,54 @@ npm run dev
 
 ```
 synth/
-├── index.html          # Main app
-├── style.css           # Retro synth styling
-├── synth.js            # Audio engine & keyboard
-├── auth.js             # Auth client & UI
-├── api/                # Backend API endpoints
+├── index.html                # Main app
+├── style.css                 # Retro synth styling
+├── synth.js                  # Audio engine & keyboard
+├── auth.js                   # Auth client & UI
+├── project.js                # Project file management
+├── project-ui.js             # Project UI dialogs
+├── api/                      # Backend API endpoints
 │   ├── auth/
 │   │   ├── signup.js
 │   │   ├── login.js
 │   │   └── verify.js
 │   └── init-db.js
 ├── lib/
-│   └── auth.js         # Auth utilities
+│   └── auth.js               # Auth utilities
 ├── package.json
-├── vercel.json         # Vercel config
-└── BACKEND_SETUP.md    # Backend setup guide
+├── vercel.json               # Vercel config
+├── BACKEND_SETUP.md          # Backend setup guide
+├── PROJECT_FORMAT.md         # .synthproj spec
+└── FILE_MANAGEMENT_GUIDE.md  # User guide
 ```
 
 ## Roadmap
 
+### Completed ✅
+- [x] User authentication (email/password)
+- [x] Project save/load system
+- [x] Autosave with recovery
+- [x] 5 built-in templates
+- [x] Recent projects tracking
+- [x] Keyboard shortcuts
+- [x] Git-friendly file format
+
+### In Progress 🚧
 - [ ] Web MIDI input support
-- [ ] Preset save/load system
-- [ ] Project file export/import
 - [ ] AudioWorklet for lower latency
 - [ ] Accessibility improvements (ARIA, keyboard nav)
+
+### Planned 📋
+- [ ] Drag & drop file import
+- [ ] ZIP bundle export with samples
+- [ ] Visual thumbnails for projects
+- [ ] Preset library system
 - [ ] First-run tutorial
 - [ ] OAuth (Google/Apple)
 - [ ] Cloud project sync
 - [ ] Collaboration features
+- [ ] Multi-track support
+- [ ] Pattern sequencer
 
 ## Contributing
 
