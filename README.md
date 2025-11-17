@@ -28,9 +28,25 @@ A browser-based digital synthesizer with retro aesthetic, user authentication, a
 - **Autosave**: Every 30 seconds with crash recovery
 - **Recent Projects**: Last 10 projects with metadata
 - **Export Bundles**: Project export (ZIP coming soon)
-- **Keyboard Shortcuts**: `Ctrl+N/O/S` for New/Open/Save
+- **Keyboard Shortcuts**: `Ctrl+N/O/S` for New/Open/Save, `Ctrl+P` for Presets
 - **Change Tracking**: Visual indicator for unsaved changes
 - **Git-Friendly Format**: Human-readable JSON for version control
+
+### Preset & Patch System
+- **30 Factory Presets**: Professional sounds across 5 categories
+  - Bass (5): Deep Bass, Wobble, 808, Reese, Funk
+  - Lead (7): Bright, Pluck, Sync, Smooth, Screamer, Soft, Stab
+  - Pad (6): Warm, Bright, Dark, Strings, Sweep, Space
+  - Keys (5): Piano, Electric Piano, Organ, Clavinet, Bell
+  - FX (5): Noise Sweep, Impact, Laser, Wind, Alarm
+- **Unlimited User Presets**: Save custom patches with full metadata
+- **Preset Browser**: Category tabs, search, favorites filtering
+- **Preview Playback**: Hear preset before loading (1-second demo)
+- **Favorite/Star System**: Mark favorites for quick access
+- **Rich Metadata**: Tags, description, BPM, key, author, timestamps
+- **Preset Morphing**: A/B crossfade slider for performance mode
+- **Export/Import**: Share `.synthpreset` JSON files
+- **Factory Protection**: Read-only factory presets (can duplicate)
 
 ### User System
 - **Authentication**: Email/password signup and login
@@ -92,25 +108,29 @@ npm run dev
 
 ```
 synth/
-├── index.html                # Main app
-├── style.css                 # Retro synth styling
-├── synth.js                  # Audio engine & keyboard
-├── auth.js                   # Auth client & UI
-├── project.js                # Project file management
-├── project-ui.js             # Project UI dialogs
-├── api/                      # Backend API endpoints
+├── index.html                  # Main app
+├── style.css                   # Retro synth styling
+├── synth.js                    # Audio engine & keyboard
+├── auth.js                     # Auth client & UI
+├── project.js                  # Project file management
+├── project-ui.js               # Project UI dialogs
+├── preset.js                   # Preset system & factory presets
+├── preset-ui.js                # Preset browser UI
+├── api/                        # Backend API endpoints
 │   ├── auth/
 │   │   ├── signup.js
 │   │   ├── login.js
 │   │   └── verify.js
 │   └── init-db.js
 ├── lib/
-│   └── auth.js               # Auth utilities
+│   └── auth.js                 # Auth utilities
 ├── package.json
-├── vercel.json               # Vercel config
-├── BACKEND_SETUP.md          # Backend setup guide
-├── PROJECT_FORMAT.md         # .synthproj spec
-└── FILE_MANAGEMENT_GUIDE.md  # User guide
+├── vercel.json                 # Vercel config
+├── BACKEND_SETUP.md            # Backend setup guide
+├── PROJECT_FORMAT.md           # .synthproj spec
+├── FILE_MANAGEMENT_GUIDE.md    # User guide
+├── PRESET_SYSTEM.md            # Preset documentation
+└── PROJECT_MANAGEMENT_SUMMARY.md
 ```
 
 ## Roadmap
@@ -123,6 +143,14 @@ synth/
 - [x] Recent projects tracking
 - [x] Keyboard shortcuts
 - [x] Git-friendly file format
+- [x] **Preset & Patch System**
+  - [x] 30 factory presets across 5 categories
+  - [x] User preset save/load/delete
+  - [x] Preset browser with search & categories
+  - [x] Favorite/star system
+  - [x] Preset morphing (A/B crossfade)
+  - [x] Rich metadata (tags, BPM, key)
+  - [x] Export/import .synthpreset files
 
 ### In Progress 🚧
 - [ ] Web MIDI input support
@@ -132,7 +160,10 @@ synth/
 ### Planned 📋
 - [ ] Drag & drop file import
 - [ ] ZIP bundle export with samples
-- [ ] Visual thumbnails for projects
+- [ ] Visual thumbnails for presets & projects
+- [ ] Preset packs & marketplace
+- [ ] Advanced morphing (non-linear curves)
+- [ ] Cloud preset sync
 - [ ] Preset library system
 - [ ] First-run tutorial
 - [ ] OAuth (Google/Apple)
