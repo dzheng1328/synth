@@ -1,5 +1,22 @@
-node_modules
-.env
-.vercel
-*.log
+# Compiled binaries
+synth
+*.o
+*.out
+*.exe
+
+# Build directories
+build/
+cmake-build-*/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
 .DS_Store
+
+# Debug symbols
+*.dSYM/
