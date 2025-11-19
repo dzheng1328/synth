@@ -3,6 +3,26 @@
 ## Overview
 Transform synth_complete.c into a professional DAW-style synthesizer with sequencing, drums, online presets, and extended features.
 
+## Parameter Routing Plan (UI ➜ Audio Thread)
+
+To keep the audio thread lock-free, every UI control that mutates DSP state must send values through the parameter queue. The first implementation covered master volume and tempo; the next wave will route the following groups:
+
+| Group            | UI Controls                                        | Param IDs |
+|------------------|----------------------------------------------------|-----------|
+| FX – Distortion  | Enabled toggle, Drive, Mix                         | `PARAM_FX_DISTORTION_ENABLED`, `PARAM_FX_DISTORTION_DRIVE`, `PARAM_FX_DISTORTION_MIX` |
+| FX – Chorus      | Enabled toggle, Rate, Depth, Mix                   | `PARAM_FX_CHORUS_ENABLED`, `PARAM_FX_CHORUS_RATE`, `PARAM_FX_CHORUS_DEPTH`, `PARAM_FX_CHORUS_MIX` |
+| FX – Compressor  | Enabled toggle, Threshold, Ratio                   | `PARAM_FX_COMP_ENABLED`, `PARAM_FX_COMP_THRESHOLD`, `PARAM_FX_COMP_RATIO` |
+| FX – Delay       | Time, Feedback, Mix                                | `PARAM_FX_DELAY_TIME`, `PARAM_FX_DELAY_FEEDBACK`, `PARAM_FX_DELAY_MIX` |
+| FX – Reverb      | Size, Damping, Mix                                 | `PARAM_FX_REVERB_SIZE`, `PARAM_FX_REVERB_DAMPING`, `PARAM_FX_REVERB_MIX` |
+| Synth Globals    | Master Volume (done), future filter/env controls   | `PARAM_MASTER_VOLUME`, `PARAM_FILTER_*`, `PARAM_ENV_*` |
+| Transport        | Tempo (done), Arp enable/rate/mode                 | `PARAM_TEMPO`, `PARAM_ARP_ENABLED`, `PARAM_ARP_RATE`, `PARAM_ARP_MODE` |
+
+Implementation steps:
+1. Expand `ParamType` enum with the IDs above.
+2. Update `param_queue_process_all()` to fan out to `g_app.fx`, `g_app.arp`, etc.
+3. In `draw_gui()`, compare old/new slider/toggle values and push queue events when they change.
+4. Add optional debug logging (guarded by `#define PARAM_DEBUG`) to trace queue traffic during testing.
+
 ## Architecture Changes
 
 ### 1. Remove

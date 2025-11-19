@@ -12,20 +12,10 @@
 
 #define GL_SILENCE_DEPRECATION
 
-#define NK_INCLUDE_FIXED_TYPES
-#define NK_INCLUDE_STANDARD_IO
-#define NK_INCLUDE_STANDARD_VARARGS
-#define NK_INCLUDE_DEFAULT_ALLOCATOR
-#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
-#define NK_INCLUDE_FONT_BAKING
-#define NK_INCLUDE_DEFAULT_FONT
-#define NK_IMPLEMENTATION
-#define NK_GLFW_GL3_IMPLEMENTATION
-#define NK_KEYSTATE_BASED_INPUT
-
 // OpenGL function loader for macOS
 #include <OpenGL/gl3.h>
 
+#include "nuklear_config.h"
 #include "nuklear.h"
 #include "nuklear_glfw_gl3.h"
 
@@ -68,19 +58,9 @@ typedef struct {
 typedef struct {
     bool enabled;
     float time_ms;    // 100-2000ms
-    float feedback;   // 0-0.95
-    float mix;        // 0-1
-    DelayLine delay_l;
-    DelayLine delay_r;
-} Delay;
-
-typedef struct {
-    bool enabled;
-    float size;       // 0-1
-    float damping;    // 0-1  
-    float mix;        // 0-1
     float buffer[4410]; // Simple comb filter
     int pos;
+    #include "nuklear_config.h"
 } Reverb;
 
 typedef struct {

@@ -17,17 +17,9 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 #include "synth_engine.h"
+#include "param_queue.h"
 
-#define NK_INCLUDE_FIXED_TYPES
-#define NK_INCLUDE_STANDARD_IO
-#define NK_INCLUDE_STANDARD_VARARGS
-#define NK_INCLUDE_DEFAULT_ALLOCATOR
-#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
-#define NK_INCLUDE_FONT_BAKING
-#define NK_INCLUDE_DEFAULT_FONT
-#define NK_IMPLEMENTATION
-#define NK_GLFW_GL3_IMPLEMENTATION
-#define NK_KEYSTATE_BASED_INPUT
+#include "nuklear_config.h"
 #include "nuklear.h"
 
 #define GLFW_INCLUDE_GLCOREARB
@@ -38,6 +30,12 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <stdbool.h>
+static inline float clampf(float value, float min_value, float max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
 
 // ============================================================================
 // CONSTANTS
@@ -646,6 +644,48 @@ typedef struct {
     FX_Compressor compressor;
 } EffectsRack;
 
+// Lightweight copies that hold only UI-facing parameter values
+typedef struct {
+    nk_bool enabled;
+    float drive;
+    float mix;
+} FX_DistortionUI;
+
+typedef struct {
+    nk_bool enabled;
+    float rate;
+    float depth;
+    float mix;
+} FX_ChorusUI;
+
+typedef struct {
+    nk_bool enabled;
+    float time;
+    float feedback;
+    float mix;
+} FX_DelayUI;
+
+typedef struct {
+    nk_bool enabled;
+    float size;
+    float damping;
+    float mix;
+} FX_ReverbUI;
+
+typedef struct {
+    nk_bool enabled;
+    float threshold;
+    float ratio;
+} FX_CompressorUI;
+
+typedef struct {
+    FX_DistortionUI distortion;
+    FX_ChorusUI chorus;
+    FX_DelayUI delay;
+    FX_ReverbUI reverb;
+    FX_CompressorUI compressor;
+} FX_UIState;
+
 // ============================================================================
 // ARPEGGIATOR
 // ============================================================================
@@ -757,6 +797,7 @@ void arp_process(Arpeggiator* arp, SynthEngine* synth, double time, double tempo
 typedef struct {
     SynthEngine synth;
     EffectsRack fx;
+    FX_UIState fx_ui;
     Arpeggiator arp;
     LoopRecorder loop_recorder;
     DrumMachine drums;
@@ -769,6 +810,7 @@ typedef struct {
     
     double current_time;
     float tempo;
+    float tempo_ui;
     int playing;
     int active_tab;
     
@@ -793,11 +835,160 @@ typedef struct {
     float env_release;
     
     float master_volume;
-    
-    int arp_enabled;
+    float master_volume_ui;
+
+    struct {
+        nk_bool enabled;
+        float rate;
+        int mode;
+    } arp_ui;
 } AppState;
 
 AppState g_app = {0};
+
+static void apply_param_change(const ParamChange* change, void* userdata) {
+    (void)userdata;
+    float value = change->value;
+    switch (change->type) {
+        case PARAM_MASTER_VOLUME:
+            g_app.master_volume = clampf(value, 0.0f, 1.0f);
+            break;
+        case PARAM_TEMPO:
+            g_app.tempo = clampf(value, 40.0f, 260.0f);
+            break;
+        case PARAM_FX_DISTORTION_ENABLED:
+            g_app.fx.distortion.enabled = value > 0.5f;
+            break;
+        case PARAM_FX_DISTORTION_DRIVE:
+            g_app.fx.distortion.drive = clampf(value, 1.0f, 20.0f);
+            break;
+        case PARAM_FX_DISTORTION_MIX:
+            g_app.fx.distortion.mix = clampf(value, 0.0f, 1.0f);
+            break;
+        case PARAM_FX_CHORUS_ENABLED:
+            g_app.fx.chorus.enabled = value > 0.5f;
+            break;
+        case PARAM_FX_CHORUS_RATE:
+            g_app.fx.chorus.rate = clampf(value, 0.1f, 5.0f);
+            break;
+        case PARAM_FX_CHORUS_DEPTH:
+            g_app.fx.chorus.depth = clampf(value, 1.0f, 50.0f);
+            break;
+        case PARAM_FX_CHORUS_MIX:
+            g_app.fx.chorus.mix = clampf(value, 0.0f, 1.0f);
+            break;
+        case PARAM_FX_COMP_ENABLED:
+            g_app.fx.compressor.enabled = value > 0.5f;
+            break;
+        case PARAM_FX_COMP_THRESHOLD:
+            g_app.fx.compressor.threshold = clampf(value, 0.0f, 1.0f);
+            break;
+        case PARAM_FX_COMP_RATIO:
+            g_app.fx.compressor.ratio = clampf(value, 1.0f, 20.0f);
+            break;
+        case PARAM_FX_DELAY_ENABLED:
+            g_app.fx.delay.enabled = value > 0.5f;
+            break;
+        case PARAM_FX_DELAY_TIME:
+            g_app.fx.delay.time = clampf(value, 0.05f, 2.0f);
+            break;
+        case PARAM_FX_DELAY_FEEDBACK:
+            g_app.fx.delay.feedback = clampf(value, 0.0f, 0.99f);
+            break;
+        case PARAM_FX_DELAY_MIX:
+            g_app.fx.delay.mix = clampf(value, 0.0f, 1.0f);
+            break;
+        case PARAM_FX_REVERB_ENABLED:
+            g_app.fx.reverb.enabled = value > 0.5f;
+            break;
+        case PARAM_FX_REVERB_SIZE:
+            g_app.fx.reverb.size = clampf(value, 0.1f, 0.95f);
+            break;
+        case PARAM_FX_REVERB_DAMPING:
+            g_app.fx.reverb.damping = clampf(value, 0.0f, 0.99f);
+            break;
+        case PARAM_FX_REVERB_MIX:
+            g_app.fx.reverb.mix = clampf(value, 0.0f, 1.0f);
+            break;
+        case PARAM_ARP_ENABLED:
+            g_app.arp.enabled = value > 0.5f;
+            if (!g_app.arp.enabled && g_app.arp.last_played_note >= 0) {
+                synth_note_off(&g_app.synth, g_app.arp.last_played_note);
+                g_app.arp.last_played_note = -1;
+            }
+            break;
+        case PARAM_ARP_RATE:
+            g_app.arp.rate = fmaxf(0.1f, value);
+            break;
+        case PARAM_ARP_MODE: {
+                int mode = (int)(value + 0.5f);
+                if (mode < ARP_OFF) mode = ARP_OFF;
+                if (mode > ARP_RANDOM) mode = ARP_RANDOM;
+                g_app.arp.mode = (ArpMode)mode;
+                break;
+            }
+        case PARAM_FILTER_CUTOFF: {
+                float cutoff = clampf(value, 20.0f, 20000.0f);
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].filter.cutoff = cutoff;
+                }
+                break;
+            }
+        case PARAM_FILTER_RESONANCE: {
+                float resonance = clampf(value, 0.0f, 1.0f);
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].filter.resonance = resonance;
+                }
+                break;
+            }
+        case PARAM_FILTER_MODE: {
+                int mode = (int)(value + 0.5f);
+                if (mode < FILTER_LP) mode = FILTER_LP;
+                if (mode >= FILTER_COUNT) mode = FILTER_COUNT - 1;
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].filter.mode = (FilterMode)mode;
+                }
+                break;
+            }
+        case PARAM_FILTER_ENV_AMOUNT: {
+                float amount = clampf(value, -1.0f, 1.0f);
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].filter.env_amount = amount;
+                }
+                break;
+            }
+        case PARAM_ENV_ATTACK: {
+                float attack = clampf(value, 0.001f, 2.0f);
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].env_amp.attack = attack;
+                }
+                break;
+            }
+        case PARAM_ENV_DECAY: {
+                float decay = clampf(value, 0.001f, 2.0f);
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].env_amp.decay = decay;
+                }
+                break;
+            }
+        case PARAM_ENV_SUSTAIN: {
+                float sustain = clampf(value, 0.0f, 1.0f);
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].env_amp.sustain = sustain;
+                }
+                break;
+            }
+        case PARAM_ENV_RELEASE: {
+                float release = clampf(value, 0.001f, 5.0f);
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    g_app.synth.voices[i].env_amp.release = release;
+                }
+                break;
+            }
+        default:
+            break;
+    }
+}
 
 // ============================================================================
 // AUDIO CALLBACK
@@ -808,6 +999,7 @@ void audio_callback(ma_device* device, void* output, const void* input, ma_uint3
     (void)input;
     
     double sample_duration = 1.0 / g_app.synth.sample_rate;
+    param_queue_drain(apply_param_change, NULL);
     
     for (ma_uint32 i = 0; i < frameCount; i++) {
         // Process loop recorder
@@ -877,7 +1069,11 @@ void draw_gui(struct nk_context* ctx) {
                 
                 nk_layout_row_dynamic(ctx, 25, 2);
                 nk_label(ctx, "Master Volume:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.0f, &g_app.master_volume, 1.0f, 0.01f);
+                float prev_master = g_app.master_volume_ui;
+                nk_slider_float(ctx, 0.0f, &g_app.master_volume_ui, 1.0f, 0.01f);
+                if (fabsf(g_app.master_volume_ui - prev_master) > 0.0001f) {
+                    param_queue_push(PARAM_MASTER_VOLUME, g_app.master_volume_ui);
+                }
                 
                 // Voice count display
                 nk_layout_row_dynamic(ctx, 25, 1);
@@ -885,6 +1081,115 @@ void draw_gui(struct nk_context* ctx) {
                 snprintf(voice_text, sizeof(voice_text), "Active Voices: %d / 8", 
                         g_app.synth.num_active_voices);
                 nk_label(ctx, voice_text, NK_TEXT_CENTERED);
+                
+                nk_layout_row_dynamic(ctx, 5, 1);
+                nk_label(ctx, "", NK_TEXT_LEFT);
+
+                nk_layout_row_dynamic(ctx, 25, 1);
+                nk_label(ctx, "═══ FILTER ═══", NK_TEXT_CENTERED);
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Cutoff (Hz):", NK_TEXT_LEFT);
+                float prev_cutoff = g_app.filter_cutoff;
+                nk_slider_float(ctx, 20.0f, &g_app.filter_cutoff, 20000.0f, 10.0f);
+                if (fabsf(g_app.filter_cutoff - prev_cutoff) > 1.0f) {
+                    param_queue_push(PARAM_FILTER_CUTOFF, g_app.filter_cutoff);
+                }
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Resonance:", NK_TEXT_LEFT);
+                float prev_res = g_app.filter_resonance;
+                nk_slider_float(ctx, 0.0f, &g_app.filter_resonance, 1.0f, 0.01f);
+                if (fabsf(g_app.filter_resonance - prev_res) > 0.0001f) {
+                    param_queue_push(PARAM_FILTER_RESONANCE, g_app.filter_resonance);
+                }
+
+                const char* filter_modes[] = {"LP", "HP", "BP", "Notch", "Allpass"};
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Mode:", NK_TEXT_LEFT);
+                int prev_filter_mode = (int)g_app.filter_mode;
+                int selected_mode = nk_combo(ctx, filter_modes, 5, prev_filter_mode, 25, nk_vec2(200, 200));
+                if (selected_mode != prev_filter_mode) {
+                    g_app.filter_mode = (FilterMode)selected_mode;
+                    param_queue_push(PARAM_FILTER_MODE, (float)selected_mode);
+                }
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Env Amount:", NK_TEXT_LEFT);
+                float prev_env_amt = g_app.filter_env;
+                nk_slider_float(ctx, -1.0f, &g_app.filter_env, 1.0f, 0.01f);
+                if (fabsf(g_app.filter_env - prev_env_amt) > 0.0001f) {
+                    param_queue_push(PARAM_FILTER_ENV_AMOUNT, g_app.filter_env);
+                }
+
+                nk_layout_row_dynamic(ctx, 10, 1);
+                nk_label(ctx, "", NK_TEXT_LEFT);
+
+                nk_layout_row_dynamic(ctx, 25, 1);
+                nk_label(ctx, "═══ AMP ENVELOPE ═══", NK_TEXT_CENTERED);
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Attack:", NK_TEXT_LEFT);
+                float prev_attack = g_app.env_attack;
+                nk_slider_float(ctx, 0.001f, &g_app.env_attack, 2.0f, 0.001f);
+                if (fabsf(g_app.env_attack - prev_attack) > 0.0001f) {
+                    param_queue_push(PARAM_ENV_ATTACK, g_app.env_attack);
+                }
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Decay:", NK_TEXT_LEFT);
+                float prev_decay = g_app.env_decay;
+                nk_slider_float(ctx, 0.001f, &g_app.env_decay, 2.0f, 0.001f);
+                if (fabsf(g_app.env_decay - prev_decay) > 0.0001f) {
+                    param_queue_push(PARAM_ENV_DECAY, g_app.env_decay);
+                }
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Sustain:", NK_TEXT_LEFT);
+                float prev_sustain = g_app.env_sustain;
+                nk_slider_float(ctx, 0.0f, &g_app.env_sustain, 1.0f, 0.01f);
+                if (fabsf(g_app.env_sustain - prev_sustain) > 0.0001f) {
+                    param_queue_push(PARAM_ENV_SUSTAIN, g_app.env_sustain);
+                }
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Release:", NK_TEXT_LEFT);
+                float prev_release = g_app.env_release;
+                nk_slider_float(ctx, 0.001f, &g_app.env_release, 5.0f, 0.001f);
+                if (fabsf(g_app.env_release - prev_release) > 0.0001f) {
+                    param_queue_push(PARAM_ENV_RELEASE, g_app.env_release);
+                }
+
+                nk_layout_row_dynamic(ctx, 5, 1);
+                nk_label(ctx, "", NK_TEXT_LEFT);
+
+                nk_layout_row_dynamic(ctx, 25, 1);
+                nk_label(ctx, "═══ ARPEGGIATOR ═══", NK_TEXT_CENTERED);
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Enable:", NK_TEXT_LEFT);
+                nk_bool prev_arp_enabled = g_app.arp_ui.enabled;
+                nk_checkbox_label(ctx, "Enabled", &g_app.arp_ui.enabled);
+                if (prev_arp_enabled != g_app.arp_ui.enabled) {
+                    param_queue_push(PARAM_ARP_ENABLED, g_app.arp_ui.enabled ? 1.0f : 0.0f);
+                }
+
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Rate (steps/sec):", NK_TEXT_LEFT);
+                float prev_arp_rate = g_app.arp_ui.rate;
+                nk_slider_float(ctx, 0.25f, &g_app.arp_ui.rate, 16.0f, 0.05f);
+                if (fabsf(g_app.arp_ui.rate - prev_arp_rate) > 0.0001f) {
+                    param_queue_push(PARAM_ARP_RATE, g_app.arp_ui.rate);
+                }
+
+                const char* arp_modes[] = {"Off", "Up", "Down", "Up-Down", "Random"};
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_label(ctx, "Mode:", NK_TEXT_LEFT);
+                int prev_arp_mode = g_app.arp_ui.mode;
+                g_app.arp_ui.mode = nk_combo(ctx, arp_modes, 5, g_app.arp_ui.mode, 25, nk_vec2(200, 200));
+                if (g_app.arp_ui.mode != prev_arp_mode) {
+                    param_queue_push(PARAM_ARP_MODE, (float)g_app.arp_ui.mode);
+                }
                 
                 break;
             }
@@ -895,40 +1200,152 @@ void draw_gui(struct nk_context* ctx) {
                 
                 // Distortion
                 nk_layout_row_dynamic(ctx, 25, 2);
-                nk_checkbox_label(ctx, "Distortion", (int*)&g_app.fx.distortion.enabled);
+                nk_bool prev_dist_enabled = g_app.fx_ui.distortion.enabled;
+                nk_checkbox_label(ctx, "Distortion", &g_app.fx_ui.distortion.enabled);
                 nk_label(ctx, "", NK_TEXT_LEFT);
-                
-                if (g_app.fx.distortion.enabled) {
-                    nk_label(ctx, "Drive:", NK_TEXT_LEFT);
-                    nk_slider_float(ctx, 1.0f, &g_app.fx.distortion.drive, 20.0f, 0.1f);
-                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-                    nk_slider_float(ctx, 0.0f, &g_app.fx.distortion.mix, 1.0f, 0.01f);
+                if (prev_dist_enabled != g_app.fx_ui.distortion.enabled) {
+                    param_queue_push(PARAM_FX_DISTORTION_ENABLED, g_app.fx_ui.distortion.enabled ? 1.0f : 0.0f);
                 }
+                
+                if (g_app.fx_ui.distortion.enabled) {
+                    nk_label(ctx, "Drive:", NK_TEXT_LEFT);
+                    float prev_drive = g_app.fx_ui.distortion.drive;
+                    nk_slider_float(ctx, 1.0f, &g_app.fx_ui.distortion.drive, 20.0f, 0.1f);
+                    if (fabsf(g_app.fx_ui.distortion.drive - prev_drive) > 0.0001f) {
+                        param_queue_push(PARAM_FX_DISTORTION_DRIVE, g_app.fx_ui.distortion.drive);
+                    }
+                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
+                    float prev_mix = g_app.fx_ui.distortion.mix;
+                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.distortion.mix, 1.0f, 0.01f);
+                    if (fabsf(g_app.fx_ui.distortion.mix - prev_mix) > 0.0001f) {
+                        param_queue_push(PARAM_FX_DISTORTION_MIX, g_app.fx_ui.distortion.mix);
+                    }
+                }
+                
+                nk_layout_row_dynamic(ctx, 5, 1);
+                nk_label(ctx, "", NK_TEXT_LEFT);
                 
                 // Chorus
                 nk_layout_row_dynamic(ctx, 25, 2);
-                nk_checkbox_label(ctx, "Chorus", (int*)&g_app.fx.chorus.enabled);
+                nk_bool prev_chorus_enabled = g_app.fx_ui.chorus.enabled;
+                nk_checkbox_label(ctx, "Chorus", &g_app.fx_ui.chorus.enabled);
                 nk_label(ctx, "", NK_TEXT_LEFT);
-                
-                if (g_app.fx.chorus.enabled) {
-                    nk_label(ctx, "Rate:", NK_TEXT_LEFT);
-                    nk_slider_float(ctx, 0.1f, &g_app.fx.chorus.rate, 5.0f, 0.1f);
-                    nk_label(ctx, "Depth:", NK_TEXT_LEFT);
-                    nk_slider_float(ctx, 1.0f, &g_app.fx.chorus.depth, 50.0f, 1.0f);
-                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-                    nk_slider_float(ctx, 0.0f, &g_app.fx.chorus.mix, 1.0f, 0.01f);
+                if (prev_chorus_enabled != g_app.fx_ui.chorus.enabled) {
+                    param_queue_push(PARAM_FX_CHORUS_ENABLED, g_app.fx_ui.chorus.enabled ? 1.0f : 0.0f);
                 }
+                
+                if (g_app.fx_ui.chorus.enabled) {
+                    nk_label(ctx, "Rate:", NK_TEXT_LEFT);
+                    float prev_rate = g_app.fx_ui.chorus.rate;
+                    nk_slider_float(ctx, 0.1f, &g_app.fx_ui.chorus.rate, 5.0f, 0.1f);
+                    if (fabsf(g_app.fx_ui.chorus.rate - prev_rate) > 0.0001f) {
+                        param_queue_push(PARAM_FX_CHORUS_RATE, g_app.fx_ui.chorus.rate);
+                    }
+                    nk_label(ctx, "Depth:", NK_TEXT_LEFT);
+                    float prev_depth = g_app.fx_ui.chorus.depth;
+                    nk_slider_float(ctx, 1.0f, &g_app.fx_ui.chorus.depth, 50.0f, 1.0f);
+                    if (fabsf(g_app.fx_ui.chorus.depth - prev_depth) > 0.0001f) {
+                        param_queue_push(PARAM_FX_CHORUS_DEPTH, g_app.fx_ui.chorus.depth);
+                    }
+                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
+                    float prev_chorus_mix = g_app.fx_ui.chorus.mix;
+                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.chorus.mix, 1.0f, 0.01f);
+                    if (fabsf(g_app.fx_ui.chorus.mix - prev_chorus_mix) > 0.0001f) {
+                        param_queue_push(PARAM_FX_CHORUS_MIX, g_app.fx_ui.chorus.mix);
+                    }
+                }
+                
+                nk_layout_row_dynamic(ctx, 5, 1);
+                nk_label(ctx, "", NK_TEXT_LEFT);
                 
                 // Compressor
                 nk_layout_row_dynamic(ctx, 25, 2);
-                nk_checkbox_label(ctx, "Compressor", (int*)&g_app.fx.compressor.enabled);
+                nk_bool prev_comp_enabled = g_app.fx_ui.compressor.enabled;
+                nk_checkbox_label(ctx, "Compressor", &g_app.fx_ui.compressor.enabled);
                 nk_label(ctx, "", NK_TEXT_LEFT);
+                if (prev_comp_enabled != g_app.fx_ui.compressor.enabled) {
+                    param_queue_push(PARAM_FX_COMP_ENABLED, g_app.fx_ui.compressor.enabled ? 1.0f : 0.0f);
+                }
                 
-                if (g_app.fx.compressor.enabled) {
+                if (g_app.fx_ui.compressor.enabled) {
                     nk_label(ctx, "Threshold:", NK_TEXT_LEFT);
-                    nk_slider_float(ctx, 0.0f, &g_app.fx.compressor.threshold, 1.0f, 0.01f);
+                    float prev_thresh = g_app.fx_ui.compressor.threshold;
+                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.compressor.threshold, 1.0f, 0.01f);
+                    if (fabsf(g_app.fx_ui.compressor.threshold - prev_thresh) > 0.0001f) {
+                        param_queue_push(PARAM_FX_COMP_THRESHOLD, g_app.fx_ui.compressor.threshold);
+                    }
                     nk_label(ctx, "Ratio:", NK_TEXT_LEFT);
-                    nk_slider_float(ctx, 1.0f, &g_app.fx.compressor.ratio, 20.0f, 0.1f);
+                    float prev_ratio = g_app.fx_ui.compressor.ratio;
+                    nk_slider_float(ctx, 1.0f, &g_app.fx_ui.compressor.ratio, 20.0f, 0.1f);
+                    if (fabsf(g_app.fx_ui.compressor.ratio - prev_ratio) > 0.0001f) {
+                        param_queue_push(PARAM_FX_COMP_RATIO, g_app.fx_ui.compressor.ratio);
+                    }
+                }
+
+                nk_layout_row_dynamic(ctx, 5, 1);
+                nk_label(ctx, "", NK_TEXT_LEFT);
+
+                // Delay
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_bool prev_delay_enabled = g_app.fx_ui.delay.enabled;
+                nk_checkbox_label(ctx, "Delay", &g_app.fx_ui.delay.enabled);
+                nk_label(ctx, "", NK_TEXT_LEFT);
+                if (prev_delay_enabled != g_app.fx_ui.delay.enabled) {
+                    param_queue_push(PARAM_FX_DELAY_ENABLED, g_app.fx_ui.delay.enabled ? 1.0f : 0.0f);
+                }
+
+                if (g_app.fx_ui.delay.enabled) {
+                    nk_label(ctx, "Time (s):", NK_TEXT_LEFT);
+                    float prev_delay_time = g_app.fx_ui.delay.time;
+                    nk_slider_float(ctx, 0.05f, &g_app.fx_ui.delay.time, 2.0f, 0.01f);
+                    if (fabsf(g_app.fx_ui.delay.time - prev_delay_time) > 0.0001f) {
+                        param_queue_push(PARAM_FX_DELAY_TIME, g_app.fx_ui.delay.time);
+                    }
+                    nk_label(ctx, "Feedback:", NK_TEXT_LEFT);
+                    float prev_feedback = g_app.fx_ui.delay.feedback;
+                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.feedback, 0.95f, 0.01f);
+                    if (fabsf(g_app.fx_ui.delay.feedback - prev_feedback) > 0.0001f) {
+                        param_queue_push(PARAM_FX_DELAY_FEEDBACK, g_app.fx_ui.delay.feedback);
+                    }
+                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
+                    float prev_delay_mix = g_app.fx_ui.delay.mix;
+                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.mix, 1.0f, 0.01f);
+                    if (fabsf(g_app.fx_ui.delay.mix - prev_delay_mix) > 0.0001f) {
+                        param_queue_push(PARAM_FX_DELAY_MIX, g_app.fx_ui.delay.mix);
+                    }
+                }
+
+                nk_layout_row_dynamic(ctx, 5, 1);
+                nk_label(ctx, "", NK_TEXT_LEFT);
+
+                // Reverb
+                nk_layout_row_dynamic(ctx, 25, 2);
+                nk_bool prev_reverb_enabled = g_app.fx_ui.reverb.enabled;
+                nk_checkbox_label(ctx, "Reverb", &g_app.fx_ui.reverb.enabled);
+                nk_label(ctx, "", NK_TEXT_LEFT);
+                if (prev_reverb_enabled != g_app.fx_ui.reverb.enabled) {
+                    param_queue_push(PARAM_FX_REVERB_ENABLED, g_app.fx_ui.reverb.enabled ? 1.0f : 0.0f);
+                }
+
+                if (g_app.fx_ui.reverb.enabled) {
+                    nk_label(ctx, "Size:", NK_TEXT_LEFT);
+                    float prev_size = g_app.fx_ui.reverb.size;
+                    nk_slider_float(ctx, 0.1f, &g_app.fx_ui.reverb.size, 0.9f, 0.01f);
+                    if (fabsf(g_app.fx_ui.reverb.size - prev_size) > 0.0001f) {
+                        param_queue_push(PARAM_FX_REVERB_SIZE, g_app.fx_ui.reverb.size);
+                    }
+                    nk_label(ctx, "Damping:", NK_TEXT_LEFT);
+                    float prev_damping = g_app.fx_ui.reverb.damping;
+                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.reverb.damping, 0.99f, 0.01f);
+                    if (fabsf(g_app.fx_ui.reverb.damping - prev_damping) > 0.0001f) {
+                        param_queue_push(PARAM_FX_REVERB_DAMPING, g_app.fx_ui.reverb.damping);
+                    }
+                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
+                    float prev_reverb_mix = g_app.fx_ui.reverb.mix;
+                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.reverb.mix, 1.0f, 0.01f);
+                    if (fabsf(g_app.fx_ui.reverb.mix - prev_reverb_mix) > 0.0001f) {
+                        param_queue_push(PARAM_FX_REVERB_MIX, g_app.fx_ui.reverb.mix);
+                    }
                 }
                 
                 break;
@@ -973,10 +1390,14 @@ void draw_gui(struct nk_context* ctx) {
                 
                 nk_layout_row_dynamic(ctx, 25, 2);
                 nk_label(ctx, "Tempo:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 60.0f, &g_app.tempo, 200.0f, 1.0f);
+                float prev_tempo = g_app.tempo_ui;
+                nk_slider_float(ctx, 60.0f, &g_app.tempo_ui, 200.0f, 1.0f);
+                if (fabsf(g_app.tempo_ui - prev_tempo) > 0.001f) {
+                    param_queue_push(PARAM_TEMPO, g_app.tempo_ui);
+                }
                 
                 char tempo_text[64];
-                snprintf(tempo_text, sizeof(tempo_text), "%.0f BPM", g_app.tempo);
+                snprintf(tempo_text, sizeof(tempo_text), "%.0f BPM", g_app.tempo_ui);
                 nk_label(ctx, tempo_text, NK_TEXT_LEFT);
                 
                 // Loop info
@@ -1124,6 +1545,24 @@ int main(void) {
     
     // Initialize synth engine
     synth_init(&g_app.synth, 44100.0f);
+    g_app.filter_cutoff = 8000.0f;
+    g_app.filter_resonance = 0.3f;
+    g_app.filter_mode = FILTER_LP;
+    g_app.filter_env = 0.0f;
+    g_app.env_attack = 0.01f;
+    g_app.env_decay = 0.1f;
+    g_app.env_sustain = 0.7f;
+    g_app.env_release = 0.3f;
+    for (int i = 0; i < MAX_VOICES; i++) {
+        g_app.synth.voices[i].filter.cutoff = g_app.filter_cutoff;
+        g_app.synth.voices[i].filter.resonance = g_app.filter_resonance;
+        g_app.synth.voices[i].filter.mode = g_app.filter_mode;
+        g_app.synth.voices[i].filter.env_amount = g_app.filter_env;
+        g_app.synth.voices[i].env_amp.attack = g_app.env_attack;
+        g_app.synth.voices[i].env_amp.decay = g_app.env_decay;
+        g_app.synth.voices[i].env_amp.sustain = g_app.env_sustain;
+        g_app.synth.voices[i].env_amp.release = g_app.env_release;
+    }
     
     // Initialize effects
     g_app.fx.distortion.drive = 5.0f;
@@ -1140,15 +1579,43 @@ int main(void) {
     g_app.fx.compressor.attack = 0.005f;
     g_app.fx.compressor.release = 0.1f;
     g_app.fx.compressor.makeup_gain = 1.5f;
+
+    // Mirror effect parameters into UI copies
+    g_app.fx_ui.distortion.enabled = g_app.fx.distortion.enabled;
+    g_app.fx_ui.distortion.drive = g_app.fx.distortion.drive;
+    g_app.fx_ui.distortion.mix = g_app.fx.distortion.mix;
+    g_app.fx_ui.chorus.enabled = g_app.fx.chorus.enabled;
+    g_app.fx_ui.chorus.rate = g_app.fx.chorus.rate;
+    g_app.fx_ui.chorus.depth = g_app.fx.chorus.depth;
+    g_app.fx_ui.chorus.mix = g_app.fx.chorus.mix;
+    g_app.fx_ui.delay.enabled = g_app.fx.delay.enabled;
+    g_app.fx_ui.delay.time = g_app.fx.delay.time;
+    g_app.fx_ui.delay.feedback = g_app.fx.delay.feedback;
+    g_app.fx_ui.delay.mix = g_app.fx.delay.mix;
+    g_app.fx_ui.reverb.enabled = g_app.fx.reverb.enabled;
+    g_app.fx_ui.reverb.size = g_app.fx.reverb.size;
+    g_app.fx_ui.reverb.damping = g_app.fx.reverb.damping;
+    g_app.fx_ui.reverb.mix = g_app.fx.reverb.mix;
+    g_app.fx_ui.compressor.enabled = g_app.fx.compressor.enabled;
+    g_app.fx_ui.compressor.threshold = g_app.fx.compressor.threshold;
+    g_app.fx_ui.compressor.ratio = g_app.fx.compressor.ratio;
     
     // Initialize loop recorder, drums, arp
     loop_recorder_init(&g_app.loop_recorder);
     drum_machine_init(&g_app.drums, 44100.0f);
     arp_init(&g_app.arp);
+    g_app.arp_ui.enabled = g_app.arp.enabled;
+    g_app.arp_ui.rate = g_app.arp.rate;
+    g_app.arp_ui.mode = g_app.arp.mode;
+    
+    // Initialize parameter queue
+    param_queue_init();
     
     // Set defaults
     g_app.tempo = 120.0f;
+    g_app.tempo_ui = g_app.tempo;
     g_app.master_volume = 0.7f;
+    g_app.master_volume_ui = g_app.master_volume;
     
     // Initialize audio
     ma_device_config config = ma_device_config_init(ma_device_type_playback);
@@ -1195,7 +1662,7 @@ int main(void) {
                                                  g_keymap[i].midi_note, 1.0f);
                 }
                 
-                if (g_app.arp_enabled) {
+                if (g_app.arp_ui.enabled) {
                     arp_note_on(&g_app.arp, g_keymap[i].midi_note);
                 } else {
                     synth_note_on(&g_app.synth, g_keymap[i].midi_note, 1.0f);
@@ -1213,7 +1680,7 @@ int main(void) {
                                                   g_keymap[i].midi_note);
                 }
                 
-                if (g_app.arp_enabled) {
+                if (g_app.arp_ui.enabled) {
                     arp_note_off(&g_app.arp, g_keymap[i].midi_note);
                 } else {
                     synth_note_off(&g_app.synth, g_keymap[i].midi_note);

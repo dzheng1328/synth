@@ -96,6 +96,26 @@ make
 ./synth
 ```
 
+### Manual macOS build for the GUI targets
+
+If you prefer to compile the standalone GUI binaries directly (without CMake), make sure you compile and link `nuklear_impl.c` alongside whichever front-end you build. This translation unit is now the single place where the Nuklear/GLFW backend is instantiated, so omitting it will lead to missing symbols, while compiling multiple implementations will reintroduce the old duplicate-definition errors.
+
+Typical example (requires Homebrew `glfw` headers/libraries and the macOS OpenGL, Cocoa, IOKit, CoreVideo, CoreAudio, and AudioToolbox frameworks):
+
+```bash
+clang -std=c11 -O2 -Wall -Wextra -Wpedantic synth_pro.c synth_engine.c param_queue.c pa_ringbuffer.c nuklear_impl.c -o synth_pro_app \
+    -I/opt/homebrew/include -L/opt/homebrew/lib -lglfw \
+    -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo \
+    -framework CoreAudio -framework AudioToolbox -lpthread
+
+clang -std=c11 -O2 -Wall -Wextra -Wpedantic synth_complete.c synth_engine.c param_queue.c pa_ringbuffer.c nuklear_impl.c -o synth_complete_app \
+    -I/opt/homebrew/include -L/opt/homebrew/lib -lglfw \
+    -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo \
+    -framework CoreAudio -framework AudioToolbox -lpthread
+```
+
+> ✅ Only `nuklear_impl.c` should define `NK_IMPLEMENTATION`/`NK_GLFW_GL3_IMPLEMENTATION`; every other translation unit simply includes `nuklear_config.h` + `nuklear.h`.
+
 ### Quick Start (Just Test)
 
 ```bash

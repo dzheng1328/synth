@@ -12,20 +12,10 @@
 
 #define GL_SILENCE_DEPRECATION
 
-#define NK_INCLUDE_FIXED_TYPES
-#define NK_INCLUDE_STANDARD_IO
-#define NK_INCLUDE_STANDARD_VARARGS
-#define NK_INCLUDE_DEFAULT_ALLOCATOR
-#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
-#define NK_INCLUDE_FONT_BAKING
-#define NK_INCLUDE_DEFAULT_FONT
-#define NK_IMPLEMENTATION
-#define NK_GLFW_GL3_IMPLEMENTATION
-#define NK_KEYSTATE_BASED_INPUT
-
 // OpenGL function loader for macOS
 #include <OpenGL/gl3.h>
 
+#include "nuklear_config.h"
 #include "nuklear.h"
 #include "nuklear_glfw_gl3.h"
 
@@ -53,9 +43,8 @@
 // ============================================================================
 
 typedef struct {
-    float buffer[88200];  // 2 seconds at 44100 Hz
+    float buffer[88200];  // 2 seconds at 44.1kHz
     int write_pos;
-    int read_pos;
     int size;
 } DelayLine;
 
@@ -106,6 +95,8 @@ void fx_distortion_process(Distortion* fx, float* left, float* right) {
 void fx_delay_init(Delay* fx) {
     memset(&fx->delay_l, 0, sizeof(DelayLine));
     memset(&fx->delay_r, 0, sizeof(DelayLine));
+    fx->delay_l.size = fx->delay_r.size = 88200;
+    fx->delay_l.write_pos = fx->delay_r.write_pos = 0;
     fx->time_ms = 500.0f;
     fx->feedback = 0.3f;
     fx->mix = 0.3f;
@@ -235,6 +226,30 @@ void arp_process(Arpeggiator* arp, SynthEngine* synth, double time, double tempo
 }
 
 // ============================================================================
+// KEYBOARD MAPPING (FL Studio Style)
+// ============================================================================
+
+typedef struct { int glfw_key; int midi_note; const char* label; } KeyMapping;
+
+static KeyMapping g_keymap[] = {
+    // Bottom row (Octave 2-3)
+    {GLFW_KEY_Z, 48, "C3"}, {GLFW_KEY_S, 49, "C#3"}, {GLFW_KEY_X, 50, "D3"},
+    {GLFW_KEY_D, 51, "D#3"}, {GLFW_KEY_C, 52, "E3"}, {GLFW_KEY_V, 53, "F3"},
+    {GLFW_KEY_G, 54, "F#3"}, {GLFW_KEY_B, 55, "G3"}, {GLFW_KEY_H, 56, "G#3"},
+    {GLFW_KEY_N, 57, "A3"}, {GLFW_KEY_J, 58, "A#3"}, {GLFW_KEY_M, 59, "B3"},
+    {GLFW_KEY_COMMA, 60, "C4"},
+    
+    // Top row (Octave 3-4)
+    {GLFW_KEY_Q, 60, "C4"}, {GLFW_KEY_2, 61, "C#4"}, {GLFW_KEY_W, 62, "D4"},
+    {GLFW_KEY_3, 63, "D#4"}, {GLFW_KEY_E, 64, "E4"}, {GLFW_KEY_R, 65, "F4"},
+    {GLFW_KEY_5, 66, "F#4"}, {GLFW_KEY_T, 67, "G4"}, {GLFW_KEY_6, 68, "G#4"},
+    {GLFW_KEY_Y, 69, "A4"}, {GLFW_KEY_7, 70, "A#4"}, {GLFW_KEY_U, 71, "B4"},
+    {GLFW_KEY_I, 72, "C5"}, {GLFW_KEY_9, 73, "C#5"}, {GLFW_KEY_O, 74, "D5"},
+    {GLFW_KEY_0, 75, "D#5"}, {GLFW_KEY_P, 76, "E5"},
+};
+#define KEYMAP_SIZE (sizeof(g_keymap) / sizeof(g_keymap[0]))
+
+// ============================================================================
 // SEQUENCER & PATTERN SYSTEM
 // ============================================================================
 
@@ -309,6 +324,9 @@ typedef struct {
     int playing;
     
     int active_tab;
+    int keys_pressed[KEYMAP_SIZE];
+    int mouse_note_playing;
+    bool mouse_was_down;
     
     // Sequencer UI state
     int selected_pattern;

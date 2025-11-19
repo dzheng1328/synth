@@ -251,6 +251,17 @@ Sharps: 2 3 5 6 7 9 0 =
 - [ ] Enable reverb - hear space/ambience
 - [ ] Enable distortion - hear saturation
 
+### Automation
+
+You can now run all eleven items headlessly via `tests/audio_checklist_test.c`, which renders through `synth_engine` and models the FX rack offline. Build and run it from the repo root:
+
+```sh
+gcc tests/audio_checklist_test.c synth_engine.c -I. -o audio_checklist_test -lm
+./audio_checklist_test
+```
+
+The harness prints PASS/FAIL metrics for every checklist step (including delay/reverb/distortion tails) and returns a non-zero exit code if anything regresses, making it safe to wire into CI.
+
 ---
 
 ## 📈 **COMPLETION PERCENTAGE**
