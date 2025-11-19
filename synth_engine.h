@@ -147,6 +147,8 @@ typedef struct {
     float resonance;          // 0.0 to 1.0 (Q factor)
     float keytrack;           // 0.0 to 1.0 (filter follows key)
     float env_amount;         // -1.0 to 1.0 (envelope modulation)
+    float cutoff_actual;      // Last applied cutoff (after modulation)
+    float resonance_actual;   // Last applied resonance (after modulation)
     
     // State variable filter state
     float low;
@@ -324,9 +326,9 @@ void osc_set_frequency(Oscillator* osc, float freq);
 
 // Filter
 void filter_init(Filter* filter, float sample_rate);
-float filter_process(Filter* filter, float input, float cutoff, float resonance);
+float filter_process(Filter* filter, float input);
 void filter_set_mode(Filter* filter, FilterMode mode);
-void filter_update_coefficients(Filter* filter, float sample_rate);
+void filter_update_coefficients(Filter* filter, float sample_rate, float cutoff, float resonance);
 
 // Envelope
 void envelope_init(Envelope* env);

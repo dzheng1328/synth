@@ -4,6 +4,14 @@
 
 #include "param_queue.h"
 
+static void counting_handler(const ParamChange* change, void* userdata) {
+    (void)change;
+    int* counter = (int*)userdata;
+    if (counter) {
+        (*counter)++;
+    }
+}
+
 int main(void) {
     printf("Running param_queue tests...\n");
     param_queue_init();
@@ -38,6 +46,18 @@ int main(void) {
         drained++;
     }
     assert(drained == PARAM_QUEUE_SIZE);
+
+    // Stress-test repeated fill/drain cycles to emulate heavy UI automation bursts
+    for (int round = 0; round < 8; ++round) {
+        for (int i = 0; i < PARAM_QUEUE_SIZE / 2; ++i) {
+            float value = (float)(round * 100 + i);
+            assert(param_queue_push(PARAM_ENV_ATTACK, value) == 1);
+        }
+        int count = 0;
+        param_queue_drain(counting_handler, &count);
+        assert(count == PARAM_QUEUE_SIZE / 2);
+        assert(param_queue_pop(&change) == 0 && "Queue should be empty after drain");
+    }
 
     printf("param_queue tests passed.\n");
     return 0;

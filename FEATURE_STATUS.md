@@ -111,8 +111,8 @@
 - ❌ Multi-out routing
 
 ### Sampling
-- ❌ WAV/AIFF/FLAC loading
-- ❌ Sample playback oscillator
+- 🚧 WAV loading (single-slot sampler in UI)
+- 🚧 Sample playback oscillator (single-shot trigger)
 - ❌ Looping modes
 - ❌ Time-stretch/pitch-shift
 - ❌ Sample browser
@@ -136,7 +136,7 @@
 - ❌ New/Save/Save As/Open
 - ❌ Auto-save
 - ❌ Crash recovery
-- ❌ Export audio (WAV/AIFF/MP3)
+- 🚧 Export audio (WAV bounce via Sample I/O tab)
 - ❌ Export stems
 - ❌ MIDI export
 - ❌ File versioning

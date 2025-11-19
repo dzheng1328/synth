@@ -2,6 +2,8 @@
 
 A minimal, cross-platform software synthesizer written in pure C.
 
+> **New:** `synth_pro` now listens to external hardware over CoreMIDI. Plug in any USB controller, run the GUI build, and incoming note/CC/pitch data will be queued lock-free into the audio thread for sample-accurate playback.
+
 ## Project Goals
 
 - Learn professional audio programming in C
@@ -42,6 +44,15 @@ A minimal, cross-platform software synthesizer written in pure C.
 - [ ] Unison/detune
 - [ ] Effects (delay, chorus)
 - [ ] GUI (optional: nuklear or ImGui)
+
+## Sample Loader & WAV Export
+
+The PRESETS tab in `synth_pro` now doubles as the file I/O hub:
+
+- **Sample Loader:** enter a path to any WAV file (mono or stereo) and click **Load WAV**. The file is decoded through the new `sample_io.c` helper (backed by miniaudio/dr_wav) and mixed through the audio callback just like the synth voices. Hit **Play Sample** to trigger a one-shot, or **Stop Sample** to halt playback.
+- **Audio Export:** specify an output path (for example `exports/bounce.wav`) and duration, then click **Render to WAV** to capture the live mix. Audio is written offline after the capture finishes, so the audio thread stays real-time safe. Every bounce uses floating-point precision and renders straight to a stereo WAV file.
+
+Exports are stored wherever you point the file picker, so feel free to create an `exports/` folder in the repo root to keep things tidy.
 
 ## Directory Structure
 
@@ -103,10 +114,10 @@ If you prefer to compile the standalone GUI binaries directly (without CMake), m
 Typical example (requires Homebrew `glfw` headers/libraries and the macOS OpenGL, Cocoa, IOKit, CoreVideo, CoreAudio, and AudioToolbox frameworks):
 
 ```bash
-clang -std=c11 -O2 -Wall -Wextra -Wpedantic synth_pro.c synth_engine.c param_queue.c pa_ringbuffer.c nuklear_impl.c -o synth_pro_app \
+clang -std=c11 -O2 -Wall -Wextra -Wpedantic synth_pro.c synth_engine.c param_queue.c pa_ringbuffer.c nuklear_impl.c midi_input.c -o synth_pro_app \
     -I/opt/homebrew/include -L/opt/homebrew/lib -lglfw \
     -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo \
-    -framework CoreAudio -framework AudioToolbox -lpthread
+    -framework CoreAudio -framework AudioToolbox -framework CoreMIDI -framework CoreFoundation -lpthread
 
 clang -std=c11 -O2 -Wall -Wextra -Wpedantic synth_complete.c synth_engine.c param_queue.c pa_ringbuffer.c nuklear_impl.c -o synth_complete_app \
     -I/opt/homebrew/include -L/opt/homebrew/lib -lglfw \

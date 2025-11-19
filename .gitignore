@@ -1,5 +1,6 @@
 # Compiled binaries
 synth
+sample_io_test
 *.o
 *.out
 *.exe

@@ -8,7 +8,7 @@
  * - Extended effects rack (Distortion, Chorus, Compressor, Delay, Reverb)
  * - Arpeggiator with multiple modes
  * - Online preset library (coming soon)
- * - MIDI I/O support (coming soon)
+ * - Hardware MIDI input via CoreMIDI
  * 
  * Keyboard Layout: Q-P = C4-E5, Z-M = C3-B3
  * Shortcuts: SPACE = toggle sequencer, ESC = panic (all notes off)
@@ -18,6 +18,8 @@
 #include "miniaudio.h"
 #include "synth_engine.h"
 #include "param_queue.h"
+#include "midi_input.h"
+#include "sample_io.h"
 
 #include "nuklear_config.h"
 #include "nuklear.h"
@@ -31,34 +33,60 @@
 #include <math.h>
 #include <time.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <limits.h>
+#include <stdint.h>
+
 static inline float clampf(float value, float min_value, float max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
     return value;
 }
 
+static void dispatch_note_on(uint8_t note, float velocity);
+static void dispatch_note_off(uint8_t note);
+
+static bool is_black_key(int midi_note) {
+    int mod = midi_note % 12;
+    return mod == 1 || mod == 3 || mod == 6 || mod == 8 || mod == 10;
+}
+
+static const char* midi_note_label(int midi_note, char* buffer, size_t size) {
+    static const char* note_names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    int mod = (midi_note % 12 + 12) % 12;
+    int octave = midi_note / 12 - 1;
+    snprintf(buffer, size, "%s%d", note_names[mod], octave);
+    return buffer;
+}
+
+typedef struct {
+    int base_note;
+    int num_keys;
+    bool note_active[128];
+    bool mouse_dragging;
+    int mouse_active_note;
+} KeyboardUIState;
+
+static void ui_apply_theme(struct nk_context* ctx);
+static void draw_transport_bar(struct nk_context* ctx);
+
 // ============================================================================
 // CONSTANTS
 // ============================================================================
 
 #define MAX_PATTERNS 4
-
-// ============================================================================
-// LOOP RECORDER SYSTEM
-// ============================================================================
-
-#define MAX_RECORDED_EVENTS 1000
+#define MAX_RECORDED_EVENTS 2048
 
 typedef enum {
-    EVENT_NOTE_ON,
-    EVENT_NOTE_OFF
+    EVENT_NOTE_ON = 0,
+    EVENT_NOTE_OFF = 1
 } EventType;
 
 typedef struct {
-    EventType type;
     int note;
     float velocity;
     double time;  // Time in seconds from loop start
+    EventType type;
 } RecordedEvent;
 
 typedef struct {
@@ -71,28 +99,24 @@ typedef struct {
 typedef struct {
     Loop loops[16];  // 16 loop slots
     int current_loop;
-    
     bool recording;
     bool playing;
-    bool overdub;  // Add to existing loop
-    
     double loop_start_time;
     double current_time;
     double loop_position;
-    
     int next_event_to_play;
-    int active_notes[128];  // Track which notes are currently on
+    uint8_t active_notes[128];
 } LoopRecorder;
 
 void loop_recorder_init(LoopRecorder* lr) {
+    if (!lr) return;
     memset(lr, 0, sizeof(LoopRecorder));
-    
+    lr->current_loop = 0;
     for (int i = 0; i < 16; i++) {
-        snprintf(lr->loops[i].name, sizeof(lr->loops[i].name), "Loop %d", i + 1);
-        lr->loops[i].loop_length = 0.0;
+        snprintf(lr->loops[i].name, sizeof(lr->loops[i].name), "Loop %02d", i + 1);
         lr->loops[i].num_events = 0;
+        lr->loops[i].loop_length = 0.0;
     }
-    
     strcpy(lr->loops[0].name, "My Loop");
 }
 
@@ -107,15 +131,26 @@ void loop_recorder_start_recording(LoopRecorder* lr) {
 
 void loop_recorder_stop_recording(LoopRecorder* lr, SynthEngine* synth) {
     if (!lr->recording) return;
+    (void)synth;
     
     lr->recording = false;
     Loop* loop = &lr->loops[lr->current_loop];
     loop->loop_length = lr->current_time - lr->loop_start_time;
+    double stop_time = loop->loop_length;
     
     // Stop all active notes
     for (int i = 0; i < 128; i++) {
         if (lr->active_notes[i]) {
-            synth_note_off(synth, i);
+            if (loop->num_events < MAX_RECORDED_EVENTS) {
+                RecordedEvent* event = &loop->events[loop->num_events++];
+                event->type = EVENT_NOTE_OFF;
+                event->note = i;
+                event->velocity = 0.0f;
+                event->time = stop_time;
+            } else {
+                printf("⚠️ Loop full while stopping recording - dropping note offs\n");
+            }
+            dispatch_note_off((uint8_t)i);
             lr->active_notes[i] = 0;
         }
     }
@@ -176,13 +211,14 @@ void loop_recorder_start_playback(LoopRecorder* lr) {
 
 void loop_recorder_stop_playback(LoopRecorder* lr, SynthEngine* synth) {
     if (!lr->playing) return;
+    (void)synth;
     
     lr->playing = false;
     
     // Stop all active notes
     for (int i = 0; i < 128; i++) {
         if (lr->active_notes[i]) {
-            synth_note_off(synth, i);
+            dispatch_note_off((uint8_t)i);
             lr->active_notes[i] = 0;
         }
     }
@@ -208,6 +244,7 @@ void loop_recorder_clear(LoopRecorder* lr, SynthEngine* synth) {
 }
 
 void loop_recorder_process(LoopRecorder* lr, SynthEngine* synth, double delta_time) {
+    (void)synth;
     lr->current_time += delta_time;
     
     if (!lr->playing) return;
@@ -223,7 +260,7 @@ void loop_recorder_process(LoopRecorder* lr, SynthEngine* synth, double delta_ti
         // Stop all notes before looping
         for (int i = 0; i < 128; i++) {
             if (lr->active_notes[i]) {
-                synth_note_off(synth, i);
+                dispatch_note_off((uint8_t)i);
                 lr->active_notes[i] = 0;
             }
         }
@@ -241,10 +278,10 @@ void loop_recorder_process(LoopRecorder* lr, SynthEngine* synth, double delta_ti
         }
         
         if (event->type == EVENT_NOTE_ON) {
-            synth_note_on(synth, event->note, event->velocity);
+            dispatch_note_on((uint8_t)event->note, event->velocity);
             lr->active_notes[event->note] = 1;
         } else if (event->type == EVENT_NOTE_OFF) {
-            synth_note_off(synth, event->note);
+            dispatch_note_off((uint8_t)event->note);
             lr->active_notes[event->note] = 0;
         }
         
@@ -704,9 +741,32 @@ typedef struct {
     int last_played_note;
 } Arpeggiator;
 
+static const float k_arp_rate_multipliers[] = {0.5f, 1.0f, 2.0f, 3.0f, 4.0f};
+static const int k_arp_rate_multiplier_count = (int)(sizeof(k_arp_rate_multipliers) / sizeof(k_arp_rate_multipliers[0]));
+static const int k_arp_rate_default_index = 1;
+
+static float arp_multiplier_value(int index) {
+    if (index < 0) index = 0;
+    if (index >= k_arp_rate_multiplier_count) index = k_arp_rate_multiplier_count - 1;
+    return k_arp_rate_multipliers[index];
+}
+
+static int arp_multiplier_index_for_value(float value) {
+    int best = 0;
+    float best_diff = fabsf(value - k_arp_rate_multipliers[0]);
+    for (int i = 1; i < k_arp_rate_multiplier_count; i++) {
+        float diff = fabsf(value - k_arp_rate_multipliers[i]);
+        if (diff < best_diff) {
+            best = i;
+            best_diff = diff;
+        }
+    }
+    return best;
+}
+
 void arp_init(Arpeggiator* arp) {
     memset(arp, 0, sizeof(Arpeggiator));
-    arp->rate = 2.0f;
+    arp->rate = arp_multiplier_value(k_arp_rate_default_index);
     arp->gate = 0.8f;
     arp->mode = ARP_UP;
     arp->last_played_note = -1;
@@ -735,6 +795,39 @@ KeyMapping g_keymap[] = {
     {GLFW_KEY_0, 75, "D#5"}, {GLFW_KEY_P, 76, "E5"},
 };
 #define KEYMAP_SIZE (sizeof(g_keymap) / sizeof(g_keymap[0]))
+
+typedef struct {
+    SampleBuffer buffer;
+    double playhead;
+    double playback_step;
+    atomic_bool trigger_pending;
+    atomic_bool stop_pending;
+    atomic_bool playing;
+    float gain;
+    char last_loaded_path[512];
+} SampleSlot;
+
+typedef struct {
+    atomic_bool arm_request;
+    atomic_bool capture_active;
+    atomic_bool capture_complete;
+    atomic_bool capture_failed;
+    float* buffer;
+    uint32_t max_frames;
+    uint32_t frames_captured;
+    uint32_t channels;
+    uint32_t sample_rate;
+    float duration_seconds;
+    char output_path[512];
+} SampleExportState;
+
+static void sample_slot_mix(SampleSlot* slot, float sample_rate, float* left, float* right);
+static void sample_export_process_frame(SampleExportState* state, float left, float right);
+static bool is_black_key(int midi_note);
+static const char* midi_note_label(int midi_note, char* buffer, size_t size);
+static void keyboard_set_note_active(uint8_t note, bool down);
+static void ui_note_on(uint8_t note);
+static void ui_note_off(uint8_t note);
 
 void arp_note_on(Arpeggiator* arp, int note) {
     if (arp->num_held < 16) {
@@ -801,6 +894,8 @@ typedef struct {
     Arpeggiator arp;
     LoopRecorder loop_recorder;
     DrumMachine drums;
+    SampleSlot sampler;
+    SampleExportState export_state;
     
     ma_device audio_device;
     GLFWwindow* window;
@@ -839,12 +934,1108 @@ typedef struct {
 
     struct {
         nk_bool enabled;
-        float rate;
+        int rate_index;
         int mode;
     } arp_ui;
+
+    KeyboardUIState keyboard_ui;
+
+    char sample_path_input[512];
+    char export_path_input[512];
+    float export_duration_seconds;
+    char sample_status[256];
+    char export_status[256];
 } AppState;
 
 AppState g_app = {0};
+
+static inline void sample_slot_frame(const SampleBuffer* buffer, uint32_t index,
+                                     float* out_left, float* out_right) {
+    if (!buffer || !buffer->data || buffer->frame_count == 0) {
+        *out_left = 0.0f;
+        *out_right = 0.0f;
+        return;
+    }
+    uint32_t channels = buffer->channels ? buffer->channels : 1;
+    size_t base = (size_t)index * channels;
+    if (channels == 1) {
+        float v = buffer->data[base];
+        *out_left = v;
+        *out_right = v;
+    } else {
+        *out_left = buffer->data[base];
+        *out_right = buffer->data[base + 1];
+    }
+}
+
+static void sample_slot_mix(SampleSlot* slot, float sample_rate, float* left, float* right) {
+    if (!slot || !slot->buffer.data || slot->buffer.frame_count == 0) {
+        return;
+    }
+
+    if (atomic_exchange_explicit(&slot->trigger_pending, false, memory_order_acq_rel)) {
+        slot->playhead = 0.0;
+        slot->playback_step = slot->buffer.sample_rate > 0
+                                   ? (double)slot->buffer.sample_rate / (double)sample_rate
+                                   : 1.0;
+        atomic_store_explicit(&slot->playing, true, memory_order_release);
+    }
+
+    if (atomic_exchange_explicit(&slot->stop_pending, false, memory_order_acq_rel)) {
+        atomic_store_explicit(&slot->playing, false, memory_order_release);
+    }
+
+    if (!atomic_load_explicit(&slot->playing, memory_order_acquire)) {
+        return;
+    }
+
+    const SampleBuffer* buffer = &slot->buffer;
+    if (slot->playhead >= buffer->frame_count) {
+        atomic_store_explicit(&slot->playing, false, memory_order_release);
+        return;
+    }
+
+    double clamped = slot->playhead;
+    if (clamped < 0.0) clamped = 0.0;
+    double max_index = (double)(buffer->frame_count - 1);
+    if (clamped > max_index) clamped = max_index;
+
+    uint32_t index = (uint32_t)clamped;
+    uint32_t next_index = (index + 1 < buffer->frame_count) ? (index + 1) : index;
+    double frac = clamped - (double)index;
+
+    float s0L, s0R, s1L, s1R;
+    sample_slot_frame(buffer, index, &s0L, &s0R);
+    sample_slot_frame(buffer, next_index, &s1L, &s1R);
+
+    float mixed_left = s0L + (s1L - s0L) * (float)frac;
+    float mixed_right = s0R + (s1R - s0R) * (float)frac;
+
+    *left += mixed_left * slot->gain;
+    *right += mixed_right * slot->gain;
+
+    slot->playhead += slot->playback_step;
+    if (slot->playhead >= buffer->frame_count) {
+        atomic_store_explicit(&slot->playing, false, memory_order_release);
+    }
+}
+
+static void sample_export_process_frame(SampleExportState* state, float left, float right) {
+    if (!state) {
+        return;
+    }
+
+    if (atomic_exchange_explicit(&state->arm_request, false, memory_order_acq_rel)) {
+        state->frames_captured = 0;
+        if (state->buffer && state->max_frames > 0) {
+            atomic_store_explicit(&state->capture_failed, false, memory_order_release);
+            atomic_store_explicit(&state->capture_active, true, memory_order_release);
+        }
+    }
+
+    if (!atomic_load_explicit(&state->capture_active, memory_order_acquire)) {
+        return;
+    }
+
+    if (!state->buffer || state->max_frames == 0) {
+        atomic_store_explicit(&state->capture_active, false, memory_order_release);
+        atomic_store_explicit(&state->capture_failed, true, memory_order_release);
+        return;
+    }
+
+    if (state->frames_captured >= state->max_frames) {
+        atomic_store_explicit(&state->capture_active, false, memory_order_release);
+        atomic_store_explicit(&state->capture_complete, true, memory_order_release);
+        return;
+    }
+
+    size_t base = (size_t)state->frames_captured * state->channels;
+    state->buffer[base] = left;
+    if (state->channels > 1) {
+        state->buffer[base + 1] = right;
+    }
+
+    state->frames_captured++;
+    if (state->frames_captured >= state->max_frames) {
+        atomic_store_explicit(&state->capture_active, false, memory_order_release);
+        atomic_store_explicit(&state->capture_complete, true, memory_order_release);
+    }
+}
+
+static bool load_sample_file(const char* path) {
+    SampleBuffer new_buffer;
+    sample_buffer_init(&new_buffer);
+    if (!sample_buffer_load_wav(&new_buffer, path)) {
+        sample_buffer_free(&new_buffer);
+        snprintf(g_app.sample_status, sizeof(g_app.sample_status),
+                 "❌ Failed to load %s", path);
+        return false;
+    }
+
+    sample_buffer_free(&g_app.sampler.buffer);
+    g_app.sampler.buffer = new_buffer;
+    g_app.sampler.playhead = 0.0;
+    atomic_store(&g_app.sampler.playing, false);
+    strncpy(g_app.sampler.last_loaded_path, path, sizeof(g_app.sampler.last_loaded_path) - 1);
+    g_app.sampler.last_loaded_path[sizeof(g_app.sampler.last_loaded_path) - 1] = '\0';
+    double duration = (double)g_app.sampler.buffer.frame_count /
+                      (double)g_app.sampler.buffer.sample_rate;
+    snprintf(g_app.sample_status, sizeof(g_app.sample_status),
+             "✅ Loaded %.2fs sample (%u ch @ %u Hz)", duration,
+             g_app.sampler.buffer.channels, g_app.sampler.buffer.sample_rate);
+    return true;
+}
+
+static bool start_export_job(float seconds, const char* path) {
+    if (!path || path[0] == '\0') {
+        snprintf(g_app.export_status, sizeof(g_app.export_status),
+                 "❌ Provide an export path");
+        return false;
+    }
+
+    if (seconds < 0.1f) seconds = 0.1f;
+    if (seconds > 120.0f) seconds = 120.0f;
+
+    SampleExportState* state = &g_app.export_state;
+    if (atomic_load(&state->capture_active) ||
+        atomic_load(&state->arm_request)) {
+        snprintf(g_app.export_status, sizeof(g_app.export_status),
+                 "⚠️ Export already in progress");
+        return false;
+    }
+
+    uint32_t sample_rate = (uint32_t)g_app.synth.sample_rate;
+    uint64_t frames64 = (uint64_t)(seconds * (float)sample_rate);
+    if (frames64 == 0) {
+        frames64 = sample_rate;
+    }
+    if (frames64 > UINT32_MAX) {
+        frames64 = UINT32_MAX;
+    }
+    uint32_t frames = (uint32_t)frames64;
+    uint32_t channels = 2;
+
+    size_t total_samples = (size_t)frames * channels;
+    float* buffer = (float*)malloc(total_samples * sizeof(float));
+    if (!buffer) {
+        snprintf(g_app.export_status, sizeof(g_app.export_status),
+                 "❌ Not enough memory for %.1fs export", seconds);
+        return false;
+    }
+
+    if (state->buffer) {
+        free(state->buffer);
+    }
+
+    state->buffer = buffer;
+    state->max_frames = frames;
+    state->frames_captured = 0;
+    state->channels = channels;
+    state->sample_rate = sample_rate;
+    state->duration_seconds = seconds;
+    strncpy(state->output_path, path, sizeof(state->output_path) - 1);
+    state->output_path[sizeof(state->output_path) - 1] = '\0';
+
+    atomic_store(&state->capture_complete, false);
+    atomic_store(&state->capture_failed, false);
+    atomic_store(&state->capture_active, false);
+    atomic_store(&state->arm_request, true);
+
+    snprintf(g_app.export_status, sizeof(g_app.export_status),
+             "⏺ Recording %.1fs to %s", seconds, state->output_path);
+    return true;
+}
+
+static void poll_export_job(void) {
+    SampleExportState* state = &g_app.export_state;
+    if (atomic_exchange(&state->capture_complete, false)) {
+        bool ok = sample_buffer_write_wav(state->output_path, state->buffer,
+                                          state->frames_captured,
+                                          state->channels,
+                                          state->sample_rate);
+        if (ok) {
+            snprintf(g_app.export_status, sizeof(g_app.export_status),
+                     "✅ Exported %.1fs (%u frames) to %s", state->duration_seconds,
+                     state->frames_captured, state->output_path);
+        } else {
+            snprintf(g_app.export_status, sizeof(g_app.export_status),
+                     "❌ Failed writing %s", state->output_path);
+        }
+        free(state->buffer);
+        state->buffer = NULL;
+        state->max_frames = 0;
+    }
+
+    if (atomic_exchange(&state->capture_failed, false)) {
+        snprintf(g_app.export_status, sizeof(g_app.export_status),
+                 "❌ Export failed (buffer overflow)");
+        free(state->buffer);
+        state->buffer = NULL;
+        state->max_frames = 0;
+    }
+}
+
+static void ui_apply_theme(struct nk_context* ctx) {
+    if (!ctx) return;
+    struct nk_color table[NK_COLOR_COUNT];
+    table[NK_COLOR_TEXT] = nk_rgba(236, 239, 244, 255);
+    table[NK_COLOR_WINDOW] = nk_rgba(18, 22, 33, 255);
+    table[NK_COLOR_HEADER] = nk_rgba(34, 38, 52, 255);
+    table[NK_COLOR_BORDER] = nk_rgba(60, 66, 92, 255);
+    table[NK_COLOR_BUTTON] = nk_rgba(70, 78, 104, 255);
+    table[NK_COLOR_BUTTON_HOVER] = nk_rgba(92, 101, 132, 255);
+    table[NK_COLOR_BUTTON_ACTIVE] = nk_rgba(235, 151, 78, 255);
+    table[NK_COLOR_TOGGLE] = nk_rgba(64, 73, 96, 255);
+    table[NK_COLOR_TOGGLE_HOVER] = nk_rgba(82, 92, 120, 255);
+    table[NK_COLOR_TOGGLE_CURSOR] = nk_rgba(235, 151, 78, 255);
+    table[NK_COLOR_SELECT] = nk_rgba(64, 73, 96, 255);
+    table[NK_COLOR_SELECT_ACTIVE] = nk_rgba(235, 151, 78, 255);
+    table[NK_COLOR_SLIDER] = nk_rgba(46, 52, 70, 255);
+    table[NK_COLOR_SLIDER_CURSOR] = nk_rgba(235, 151, 78, 255);
+    table[NK_COLOR_SLIDER_CURSOR_HOVER] = nk_rgba(248, 190, 120, 255);
+    table[NK_COLOR_SLIDER_CURSOR_ACTIVE] = nk_rgba(255, 208, 120, 255);
+    table[NK_COLOR_PROPERTY] = nk_rgba(30, 34, 48, 255);
+    table[NK_COLOR_EDIT] = nk_rgba(30, 34, 48, 255);
+    table[NK_COLOR_EDIT_CURSOR] = nk_rgba(245, 245, 245, 255);
+    table[NK_COLOR_COMBO] = nk_rgba(30, 34, 48, 255);
+    table[NK_COLOR_CHART] = nk_rgba(64, 73, 96, 255);
+    table[NK_COLOR_CHART_COLOR] = nk_rgba(235, 151, 78, 255);
+    table[NK_COLOR_CHART_COLOR_HIGHLIGHT] = nk_rgba(250, 214, 165, 255);
+    table[NK_COLOR_SCROLLBAR] = nk_rgba(24, 28, 40, 255);
+    table[NK_COLOR_SCROLLBAR_CURSOR] = nk_rgba(64, 73, 96, 255);
+    table[NK_COLOR_SCROLLBAR_CURSOR_HOVER] = nk_rgba(90, 101, 132, 255);
+    table[NK_COLOR_SCROLLBAR_CURSOR_ACTIVE] = nk_rgba(235, 151, 78, 255);
+    table[NK_COLOR_TAB_HEADER] = nk_rgba(34, 38, 52, 255);
+    nk_style_from_table(ctx, table);
+    ctx->style.window.padding = nk_vec2(16.0f, 16.0f);
+    ctx->style.window.spacing = nk_vec2(12.0f, 12.0f);
+    ctx->style.window.border = 2.0f;
+    ctx->style.button.padding = nk_vec2(12.0f, 8.0f);
+    ctx->style.button.rounding = 4.0f;
+}
+
+static void draw_status_text(struct nk_context* ctx, const char* label, const char* value) {
+    nk_layout_row_dynamic(ctx, 18, 2);
+    nk_label(ctx, label, NK_TEXT_LEFT);
+    nk_label(ctx, value ? value : "", NK_TEXT_RIGHT);
+}
+
+static bool draw_knob(struct nk_context* ctx, const char* label, float* value,
+                      float min, float max, float step);
+static bool draw_knob(struct nk_context* ctx, const char* label, float* value,
+                      float min, float max, float step) {
+    if (!ctx || !value) {
+        return false;
+    }
+
+    struct nk_rect bounds = nk_widget_bounds(ctx);
+    enum nk_widget_layout_states state = nk_widget(&bounds, ctx);
+    if (state == NK_WIDGET_INVALID) {
+        return false;
+    }
+
+    struct nk_command_buffer* out = nk_window_get_canvas(ctx);
+    struct nk_input* in = &ctx->input;
+    bool hover = nk_input_is_mouse_hovering_rect(in, bounds);
+    bool active = hover && nk_input_is_mouse_down(in, NK_BUTTON_LEFT);
+    bool changed = false;
+    float range = max - min;
+    if (range <= 0.0f) {
+        range = 1.0f;
+    }
+
+    if (active) {
+        float delta = -in->mouse.delta.y * step * 0.5f;
+        if (fabsf(delta) > 0.0f) {
+            float new_val = clampf(*value + delta, min, max);
+            if (fabsf(new_val - *value) > 0.0001f) {
+                *value = new_val;
+                changed = true;
+            }
+        }
+    }
+
+    if (hover && fabsf(in->mouse.scroll_delta.y) > 0.0f) {
+        float delta = in->mouse.scroll_delta.y * step;
+        float new_val = clampf(*value + delta, min, max);
+        if (fabsf(new_val - *value) > 0.0001f) {
+            *value = new_val;
+            changed = true;
+        }
+        in->mouse.scroll_delta.y = 0.0f;
+    }
+
+    float cx = bounds.x + bounds.w * 0.5f;
+    float cy = bounds.y + bounds.h * 0.5f - 8.0f;
+    float radius = fminf(bounds.w, bounds.h - 18.0f) * 0.5f;
+    if (radius < 10.0f) radius = 10.0f;
+
+    struct nk_color face = hover ? nk_rgb(86, 94, 128) : nk_rgb(64, 72, 104);
+    struct nk_color edge = nk_rgb(18, 22, 33);
+    struct nk_color indicator = nk_rgb(235, 151, 78);
+
+    nk_fill_circle(out, nk_rect(cx - radius, cy - radius, radius * 2.0f, radius * 2.0f), face);
+    nk_stroke_circle(out, nk_rect(cx - radius, cy - radius, radius * 2.0f, radius * 2.0f), 2.0f, edge);
+
+    float t = (*value - min) / range;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    float angle = (-140.0f + 280.0f * t) * (float)M_PI / 180.0f;
+    float x2 = cx + cosf(angle) * radius * 0.8f;
+    float y2 = cy + sinf(angle) * radius * 0.8f;
+    nk_stroke_line(out, cx, cy, x2, y2, 3.0f, indicator);
+
+    char value_buf[32];
+    snprintf(value_buf, sizeof(value_buf), "%.2f", *value);
+    struct nk_color text_color = ctx->style.text.color;
+    struct nk_rect value_rect = nk_rect(bounds.x, bounds.y + 4.0f, bounds.w, 16.0f);
+    nk_draw_text(out, value_rect, value_buf, (int)strlen(value_buf), ctx->style.font, nk_rgba(0, 0, 0, 0), text_color);
+
+    struct nk_rect label_rect = nk_rect(bounds.x, bounds.y + bounds.h - 16.0f, bounds.w, 16.0f);
+    nk_draw_text(out, label_rect, label, (int)strlen(label), ctx->style.font, nk_rgba(0, 0, 0, 0), text_color);
+
+    return changed;
+}
+static void draw_keyboard_panel(struct nk_context* ctx);
+
+static void draw_distortion_card(struct nk_context* ctx);
+static void draw_chorus_card(struct nk_context* ctx);
+static void draw_delay_card(struct nk_context* ctx);
+static void draw_reverb_card(struct nk_context* ctx);
+static void draw_compressor_card(struct nk_context* ctx);
+static void draw_synth_panel(struct nk_context* ctx);
+static void draw_fx_panel(struct nk_context* ctx);
+static void draw_loop_panel(struct nk_context* ctx);
+static void draw_drums_panel(struct nk_context* ctx);
+static void draw_sample_loader_panel(struct nk_context* ctx);
+static void draw_export_panel(struct nk_context* ctx);
+static void draw_performance_panel(struct nk_context* ctx);
+
+static void draw_keyboard_panel(struct nk_context* ctx) {
+    KeyboardUIState* kb = &g_app.keyboard_ui;
+    if (!kb) {
+        return;
+    }
+
+    int max_base = 127 - kb->num_keys;
+    if (max_base < 0) max_base = 0;
+    if (kb->base_note < 0) kb->base_note = 0;
+    if (kb->base_note > max_base) kb->base_note = max_base;
+
+    nk_flags panel_flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+    if (!nk_group_begin_titled(ctx, "GUI_KEYBOARD", "Performance Keyboard", panel_flags)) {
+        return;
+    }
+
+    nk_layout_row_template_begin(ctx, 32.0f);
+    nk_layout_row_template_push_static(ctx, 110.0f);
+    nk_layout_row_template_push_variable(ctx, 1.0f);
+    nk_layout_row_template_push_static(ctx, 110.0f);
+    nk_layout_row_template_end(ctx);
+
+    if (nk_button_label(ctx, "Octave -")) {
+        kb->base_note = (kb->base_note - 12 < 0) ? 0 : kb->base_note - 12;
+    }
+
+    char start_label[8];
+    char end_label[8];
+    char range_text[64];
+    midi_note_label(kb->base_note, start_label, sizeof(start_label));
+    int end_note = kb->base_note + kb->num_keys - 1;
+    if (end_note > 127) end_note = 127;
+    midi_note_label(end_note, end_label, sizeof(end_label));
+    snprintf(range_text, sizeof(range_text), "Range: %s – %s", start_label, end_label);
+    nk_label(ctx, range_text, NK_TEXT_CENTERED);
+
+    if (nk_button_label(ctx, "Octave +")) {
+        int proposed = kb->base_note + 12;
+        kb->base_note = (proposed > max_base) ? max_base : proposed;
+    }
+
+    nk_layout_row_dynamic(ctx, 20, 2);
+    nk_label(ctx, "Click & drag across keys to glide notes.", NK_TEXT_LEFT);
+    nk_label(ctx, "Shift octaves to reach bass or lead ranges.", NK_TEXT_RIGHT);
+
+    nk_layout_row_dynamic(ctx, 140, 1);
+    struct nk_rect bounds = nk_widget_bounds(ctx);
+    enum nk_widget_layout_states state = nk_widget(&bounds, ctx);
+    if (state != NK_WIDGET_INVALID) {
+        const float padding = 8.0f;
+        struct nk_rect inner = nk_rect(bounds.x + padding, bounds.y + padding,
+                                       bounds.w - padding * 2.0f, bounds.h - padding * 2.0f);
+        if (inner.w < 10.0f || inner.h < 10.0f) {
+            nk_group_end(ctx);
+            return;
+        }
+
+        struct nk_command_buffer* out = nk_window_get_canvas(ctx);
+        nk_fill_rect(out, bounds, 8.0f, nk_rgb(14, 18, 30));
+
+        int start_note = kb->base_note;
+        int stop_note = kb->base_note + kb->num_keys;
+        if (stop_note > 128) stop_note = 128;
+
+        int white_count = 0;
+        for (int note = start_note; note < stop_note; note++) {
+            if (!is_black_key(note)) {
+                white_count++;
+            }
+        }
+        if (white_count <= 0) white_count = 1;
+
+        float white_width = inner.w / (float)white_count;
+        float white_height = inner.h;
+        float black_width = white_width * 0.6f;
+        if (black_width < 9.0f) black_width = 9.0f;
+        float black_height = inner.h * 0.62f;
+
+        struct KeyVisual {
+            struct nk_rect rect;
+            bool visible;
+            bool black;
+        } key_visual[128] = {0};
+
+        float cursor_x = inner.x;
+        for (int note = start_note; note < stop_note; note++) {
+            if (is_black_key(note)) continue;
+            struct nk_rect key_rect = nk_rect(cursor_x, inner.y, white_width - 1.0f, white_height);
+            key_visual[note].rect = key_rect;
+            key_visual[note].visible = true;
+            key_visual[note].black = false;
+            cursor_x += white_width;
+        }
+
+        for (int note = start_note; note < stop_note; note++) {
+            if (!is_black_key(note)) continue;
+            int prev = note - 1;
+            while (prev >= start_note && is_black_key(prev)) prev--;
+            int next = note + 1;
+            while (next < stop_note && is_black_key(next)) next++;
+            if (prev < start_note || next >= stop_note) continue;
+            if (!key_visual[prev].visible || !key_visual[next].visible) continue;
+            float left = key_visual[prev].rect.x + key_visual[prev].rect.w;
+            float right = key_visual[next].rect.x;
+            float center = (left + right) * 0.5f;
+            struct nk_rect key_rect = nk_rect(center - black_width * 0.5f, inner.y,
+                                              black_width, black_height);
+            key_visual[note].rect = key_rect;
+            key_visual[note].visible = true;
+            key_visual[note].black = true;
+        }
+
+        int hovered_note = -1;
+        struct nk_input* in = &ctx->input;
+        if (nk_input_is_mouse_hovering_rect(in, bounds)) {
+            for (int note = start_note; note < stop_note; note++) {
+                if (key_visual[note].visible && key_visual[note].black &&
+                    nk_input_is_mouse_hovering_rect(in, key_visual[note].rect)) {
+                    hovered_note = note;
+                    break;
+                }
+            }
+            if (hovered_note == -1) {
+                for (int note = start_note; note < stop_note; note++) {
+                    if (key_visual[note].visible && !key_visual[note].black &&
+                        nk_input_is_mouse_hovering_rect(in, key_visual[note].rect)) {
+                        hovered_note = note;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (int note = start_note; note < stop_note; note++) {
+            if (!key_visual[note].visible || key_visual[note].black) continue;
+            bool active = kb->note_active[note];
+            bool hovered = (hovered_note == note);
+            struct nk_color fill = active ? nk_rgb(255, 196, 92) : nk_rgb(238, 241, 247);
+            if (hovered && !active) {
+                fill = nk_rgb(250, 230, 180);
+            }
+            struct nk_color border = nk_rgb(48, 58, 82);
+            nk_fill_rect(out, key_visual[note].rect, 4.0f, fill);
+            nk_stroke_rect(out, key_visual[note].rect, 4.0f, 1.5f, border);
+
+            char label[8];
+            midi_note_label(note, label, sizeof(label));
+            struct nk_rect text_rect = nk_rect(key_visual[note].rect.x + 4.0f,
+                                               key_visual[note].rect.y + key_visual[note].rect.h - 18.0f,
+                                               key_visual[note].rect.w - 8.0f, 14.0f);
+            nk_draw_text(out, text_rect, label, (int)strlen(label), ctx->style.font,
+                         nk_rgba(0, 0, 0, 0), nk_rgb(22, 30, 44));
+        }
+
+        for (int note = start_note; note < stop_note; note++) {
+            if (!key_visual[note].visible || !key_visual[note].black) continue;
+            bool active = kb->note_active[note];
+            bool hovered = (hovered_note == note);
+            struct nk_color fill = active ? nk_rgb(255, 170, 60) : nk_rgb(30, 34, 47);
+            if (hovered && !active) {
+                fill = nk_rgb(80, 90, 120);
+            }
+            nk_fill_rect(out, key_visual[note].rect, 4.0f, fill);
+            nk_stroke_rect(out, key_visual[note].rect, 4.0f, 1.5f, nk_rgb(10, 12, 20));
+        }
+
+        bool mouse_down = nk_input_is_mouse_down(in, NK_BUTTON_LEFT);
+        if (!mouse_down && kb->mouse_dragging) {
+            if (kb->mouse_active_note >= 0) {
+                ui_note_off((uint8_t)kb->mouse_active_note);
+            }
+            kb->mouse_active_note = -1;
+            kb->mouse_dragging = false;
+        } else if (mouse_down) {
+            if (!kb->mouse_dragging && hovered_note >= 0) {
+                ui_note_on((uint8_t)hovered_note);
+                kb->mouse_active_note = hovered_note;
+                kb->mouse_dragging = true;
+            } else if (kb->mouse_dragging && hovered_note >= 0 && hovered_note != kb->mouse_active_note) {
+                if (kb->mouse_active_note >= 0) {
+                    ui_note_off((uint8_t)kb->mouse_active_note);
+                }
+                ui_note_on((uint8_t)hovered_note);
+                kb->mouse_active_note = hovered_note;
+            }
+        }
+    }
+
+    nk_group_end(ctx);
+}
+
+static void draw_distortion_card(struct nk_context* ctx) {
+    if (nk_group_begin_titled(ctx, "FX_DISTORTION", "Distortion", NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_bool prev_enabled = g_app.fx_ui.distortion.enabled;
+        nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.distortion.enabled);
+        if (prev_enabled != g_app.fx_ui.distortion.enabled) {
+            param_queue_push(PARAM_FX_DISTORTION_ENABLED, g_app.fx_ui.distortion.enabled ? 1.0f : 0.0f);
+        }
+        if (g_app.fx_ui.distortion.enabled) {
+            nk_layout_row_dynamic(ctx, 120, 2);
+            float prev_drive = g_app.fx_ui.distortion.drive;
+            float prev_mix = g_app.fx_ui.distortion.mix;
+            if (draw_knob(ctx, "Drive", &g_app.fx_ui.distortion.drive, 1.0f, 20.0f, 0.1f) &&
+                fabsf(g_app.fx_ui.distortion.drive - prev_drive) > 0.0001f) {
+                param_queue_push(PARAM_FX_DISTORTION_DRIVE, g_app.fx_ui.distortion.drive);
+            }
+            if (draw_knob(ctx, "Mix", &g_app.fx_ui.distortion.mix, 0.0f, 1.0f, 0.01f) &&
+                fabsf(g_app.fx_ui.distortion.mix - prev_mix) > 0.0001f) {
+                param_queue_push(PARAM_FX_DISTORTION_MIX, g_app.fx_ui.distortion.mix);
+            }
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_chorus_card(struct nk_context* ctx) {
+    if (nk_group_begin_titled(ctx, "FX_CHORUS", "Chorus", NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_bool prev_enabled = g_app.fx_ui.chorus.enabled;
+        nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.chorus.enabled);
+        if (prev_enabled != g_app.fx_ui.chorus.enabled) {
+            param_queue_push(PARAM_FX_CHORUS_ENABLED, g_app.fx_ui.chorus.enabled ? 1.0f : 0.0f);
+        }
+        if (g_app.fx_ui.chorus.enabled) {
+            nk_layout_row_dynamic(ctx, 25, 1);
+            nk_label(ctx, "Rate (Hz)", NK_TEXT_LEFT);
+            float prev_rate = g_app.fx_ui.chorus.rate;
+            nk_slider_float(ctx, 0.1f, &g_app.fx_ui.chorus.rate, 5.0f, 0.1f);
+            if (fabsf(g_app.fx_ui.chorus.rate - prev_rate) > 0.0001f) {
+                param_queue_push(PARAM_FX_CHORUS_RATE, g_app.fx_ui.chorus.rate);
+            }
+            nk_label(ctx, "Depth", NK_TEXT_LEFT);
+            float prev_depth = g_app.fx_ui.chorus.depth;
+            nk_slider_float(ctx, 1.0f, &g_app.fx_ui.chorus.depth, 50.0f, 1.0f);
+            if (fabsf(g_app.fx_ui.chorus.depth - prev_depth) > 0.0001f) {
+                param_queue_push(PARAM_FX_CHORUS_DEPTH, g_app.fx_ui.chorus.depth);
+            }
+            nk_label(ctx, "Mix", NK_TEXT_LEFT);
+            float prev_mix = g_app.fx_ui.chorus.mix;
+            nk_slider_float(ctx, 0.0f, &g_app.fx_ui.chorus.mix, 1.0f, 0.01f);
+            if (fabsf(g_app.fx_ui.chorus.mix - prev_mix) > 0.0001f) {
+                param_queue_push(PARAM_FX_CHORUS_MIX, g_app.fx_ui.chorus.mix);
+            }
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_delay_card(struct nk_context* ctx) {
+    if (nk_group_begin_titled(ctx, "FX_DELAY", "Delay", NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_bool prev_enabled = g_app.fx_ui.delay.enabled;
+        nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.delay.enabled);
+        if (prev_enabled != g_app.fx_ui.delay.enabled) {
+            param_queue_push(PARAM_FX_DELAY_ENABLED, g_app.fx_ui.delay.enabled ? 1.0f : 0.0f);
+        }
+        if (g_app.fx_ui.delay.enabled) {
+            nk_layout_row_dynamic(ctx, 25, 1);
+            nk_label(ctx, "Time (s)", NK_TEXT_LEFT);
+            float prev_time = g_app.fx_ui.delay.time;
+            nk_slider_float(ctx, 0.05f, &g_app.fx_ui.delay.time, 2.0f, 0.01f);
+            if (fabsf(g_app.fx_ui.delay.time - prev_time) > 0.0001f) {
+                param_queue_push(PARAM_FX_DELAY_TIME, g_app.fx_ui.delay.time);
+            }
+            nk_label(ctx, "Feedback", NK_TEXT_LEFT);
+            float prev_feedback = g_app.fx_ui.delay.feedback;
+            nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.feedback, 0.95f, 0.01f);
+            if (fabsf(g_app.fx_ui.delay.feedback - prev_feedback) > 0.0001f) {
+                param_queue_push(PARAM_FX_DELAY_FEEDBACK, g_app.fx_ui.delay.feedback);
+            }
+            nk_label(ctx, "Mix", NK_TEXT_LEFT);
+            float prev_mix = g_app.fx_ui.delay.mix;
+            nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.mix, 1.0f, 0.01f);
+            if (fabsf(g_app.fx_ui.delay.mix - prev_mix) > 0.0001f) {
+                param_queue_push(PARAM_FX_DELAY_MIX, g_app.fx_ui.delay.mix);
+            }
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_reverb_card(struct nk_context* ctx) {
+    if (nk_group_begin_titled(ctx, "FX_REVERB", "Reverb", NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_bool prev_enabled = g_app.fx_ui.reverb.enabled;
+        nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.reverb.enabled);
+        if (prev_enabled != g_app.fx_ui.reverb.enabled) {
+            param_queue_push(PARAM_FX_REVERB_ENABLED, g_app.fx_ui.reverb.enabled ? 1.0f : 0.0f);
+        }
+        if (g_app.fx_ui.reverb.enabled) {
+            nk_layout_row_dynamic(ctx, 120, 3);
+            float prev_size = g_app.fx_ui.reverb.size;
+            float prev_damping = g_app.fx_ui.reverb.damping;
+            float prev_mix = g_app.fx_ui.reverb.mix;
+            if (draw_knob(ctx, "Size", &g_app.fx_ui.reverb.size, 0.1f, 0.95f, 0.01f) &&
+                fabsf(g_app.fx_ui.reverb.size - prev_size) > 0.0001f) {
+                param_queue_push(PARAM_FX_REVERB_SIZE, g_app.fx_ui.reverb.size);
+            }
+            if (draw_knob(ctx, "Damping", &g_app.fx_ui.reverb.damping, 0.0f, 0.99f, 0.01f) &&
+                fabsf(g_app.fx_ui.reverb.damping - prev_damping) > 0.0001f) {
+                param_queue_push(PARAM_FX_REVERB_DAMPING, g_app.fx_ui.reverb.damping);
+            }
+            if (draw_knob(ctx, "Mix", &g_app.fx_ui.reverb.mix, 0.0f, 1.0f, 0.01f) &&
+                fabsf(g_app.fx_ui.reverb.mix - prev_mix) > 0.0001f) {
+                param_queue_push(PARAM_FX_REVERB_MIX, g_app.fx_ui.reverb.mix);
+            }
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_compressor_card(struct nk_context* ctx) {
+    if (nk_group_begin_titled(ctx, "FX_COMP", "Compressor", NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_bool prev_enabled = g_app.fx_ui.compressor.enabled;
+        nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.compressor.enabled);
+        if (prev_enabled != g_app.fx_ui.compressor.enabled) {
+            param_queue_push(PARAM_FX_COMP_ENABLED, g_app.fx_ui.compressor.enabled ? 1.0f : 0.0f);
+        }
+        if (g_app.fx_ui.compressor.enabled) {
+            nk_layout_row_dynamic(ctx, 120, 2);
+            float prev_threshold = g_app.fx_ui.compressor.threshold;
+            float prev_ratio = g_app.fx_ui.compressor.ratio;
+            if (draw_knob(ctx, "Threshold", &g_app.fx_ui.compressor.threshold, 0.0f, 1.0f, 0.01f) &&
+                fabsf(g_app.fx_ui.compressor.threshold - prev_threshold) > 0.0001f) {
+                param_queue_push(PARAM_FX_COMP_THRESHOLD, g_app.fx_ui.compressor.threshold);
+            }
+            if (draw_knob(ctx, "Ratio", &g_app.fx_ui.compressor.ratio, 1.0f, 20.0f, 0.1f) &&
+                fabsf(g_app.fx_ui.compressor.ratio - prev_ratio) > 0.0001f) {
+                param_queue_push(PARAM_FX_COMP_RATIO, g_app.fx_ui.compressor.ratio);
+            }
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_synth_panel(struct nk_context* ctx) {
+    nk_flags panel_flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+
+    nk_layout_row_dynamic(ctx, 150, 2);
+    if (nk_group_begin_titled(ctx, "SYNTH_TONE", "Tone & Filter", panel_flags)) {
+        nk_layout_row_dynamic(ctx, 110, 4);
+        float prev_master = g_app.master_volume_ui;
+        float prev_cutoff = g_app.filter_cutoff;
+        float prev_res = g_app.filter_resonance;
+        float prev_env_amt = g_app.filter_env;
+
+        if (draw_knob(ctx, "Master", &g_app.master_volume_ui, 0.0f, 1.0f, 0.01f) &&
+            fabsf(g_app.master_volume_ui - prev_master) > 0.0001f) {
+            param_queue_push(PARAM_MASTER_VOLUME, g_app.master_volume_ui);
+        }
+        if (draw_knob(ctx, "Cutoff", &g_app.filter_cutoff, 20.0f, 20000.0f, 50.0f) &&
+            fabsf(g_app.filter_cutoff - prev_cutoff) > 1.0f) {
+            param_queue_push(PARAM_FILTER_CUTOFF, g_app.filter_cutoff);
+        }
+        if (draw_knob(ctx, "Resonance", &g_app.filter_resonance, 0.0f, 1.0f, 0.01f) &&
+            fabsf(g_app.filter_resonance - prev_res) > 0.0001f) {
+            param_queue_push(PARAM_FILTER_RESONANCE, g_app.filter_resonance);
+        }
+        if (draw_knob(ctx, "Env Amt", &g_app.filter_env, -1.0f, 1.0f, 0.01f) &&
+            fabsf(g_app.filter_env - prev_env_amt) > 0.0001f) {
+            param_queue_push(PARAM_FILTER_ENV_AMOUNT, g_app.filter_env);
+        }
+
+        const char* filter_modes[] = {"LP", "HP", "BP", "Notch", "Allpass"};
+        nk_layout_row_dynamic(ctx, 26, 2);
+        nk_label(ctx, "Filter Mode", NK_TEXT_LEFT);
+        int prev_filter_mode = (int)g_app.filter_mode;
+        int selected_mode = nk_combo(ctx, filter_modes, 5, prev_filter_mode, 24, nk_vec2(180, 140));
+        if (selected_mode != prev_filter_mode) {
+            g_app.filter_mode = (FilterMode)selected_mode;
+            param_queue_push(PARAM_FILTER_MODE, (float)selected_mode);
+        }
+        nk_group_end(ctx);
+    }
+
+    if (nk_group_begin_titled(ctx, "SYNTH_ENV", "Envelope & Dynamics", panel_flags)) {
+        nk_layout_row_dynamic(ctx, 110, 4);
+        float prev_attack = g_app.env_attack;
+        float prev_decay = g_app.env_decay;
+        float prev_sustain = g_app.env_sustain;
+        float prev_release = g_app.env_release;
+
+        if (draw_knob(ctx, "Attack", &g_app.env_attack, 0.001f, 2.0f, 0.005f) &&
+            fabsf(g_app.env_attack - prev_attack) > 0.0001f) {
+            param_queue_push(PARAM_ENV_ATTACK, g_app.env_attack);
+        }
+        if (draw_knob(ctx, "Decay", &g_app.env_decay, 0.001f, 2.0f, 0.005f) &&
+            fabsf(g_app.env_decay - prev_decay) > 0.0001f) {
+            param_queue_push(PARAM_ENV_DECAY, g_app.env_decay);
+        }
+        if (draw_knob(ctx, "Sustain", &g_app.env_sustain, 0.0f, 1.0f, 0.01f) &&
+            fabsf(g_app.env_sustain - prev_sustain) > 0.0001f) {
+            param_queue_push(PARAM_ENV_SUSTAIN, g_app.env_sustain);
+        }
+        if (draw_knob(ctx, "Release", &g_app.env_release, 0.001f, 5.0f, 0.01f) &&
+            fabsf(g_app.env_release - prev_release) > 0.0001f) {
+            param_queue_push(PARAM_ENV_RELEASE, g_app.env_release);
+        }
+
+        nk_layout_row_dynamic(ctx, 26, 1);
+        char voice_text[64];
+        snprintf(voice_text, sizeof(voice_text), "Active Voices: %d / %d", g_app.synth.num_active_voices, MAX_VOICES);
+        nk_label(ctx, voice_text, NK_TEXT_LEFT);
+        nk_size voice_bar = (nk_size)g_app.synth.num_active_voices;
+        nk_progress(ctx, &voice_bar, MAX_VOICES, NK_FIXED);
+        nk_group_end(ctx);
+    }
+
+    nk_layout_row_dynamic(ctx, 110, 1);
+    if (nk_group_begin_titled(ctx, "SYNTH_ARP", "Arpeggiator", panel_flags)) {
+        nk_layout_row_dynamic(ctx, 26, 2);
+        nk_bool prev_arp_enabled = g_app.arp_ui.enabled;
+        nk_checkbox_label(ctx, "Enabled", &g_app.arp_ui.enabled);
+        if (prev_arp_enabled != g_app.arp_ui.enabled) {
+            param_queue_push(PARAM_ARP_ENABLED, g_app.arp_ui.enabled ? 1.0f : 0.0f);
+        }
+
+        nk_layout_row_dynamic(ctx, 24, 1);
+        nk_label(ctx, "Tempo Multiplier", NK_TEXT_LEFT);
+        nk_layout_row_dynamic(ctx, 32, k_arp_rate_multiplier_count);
+        for (int i = 0; i < k_arp_rate_multiplier_count; i++) {
+            struct nk_style_button style = ctx->style.button;
+            if (i == g_app.arp_ui.rate_index) {
+                style.normal.data.color = nk_rgb(70, 110, 190);
+                style.hover.data.color = nk_rgb(90, 140, 220);
+                style.text_normal = nk_rgb(255, 255, 255);
+            }
+            float multiplier = arp_multiplier_value(i);
+            char label[16];
+            if (fabsf(multiplier - roundf(multiplier)) < 0.05f) {
+                snprintf(label, sizeof(label), "%.0fx", multiplier);
+            } else {
+                snprintf(label, sizeof(label), "%.1fx", multiplier);
+            }
+            if (nk_button_label_styled(ctx, &style, label) && g_app.arp_ui.rate_index != i) {
+                g_app.arp_ui.rate_index = i;
+                param_queue_push(PARAM_ARP_RATE, multiplier);
+            }
+        }
+
+        const char* arp_modes[] = {"Off", "Up", "Down", "Up-Down", "Random"};
+        nk_layout_row_dynamic(ctx, 26, 2);
+        nk_label(ctx, "Mode", NK_TEXT_LEFT);
+        int prev_arp_mode = g_app.arp_ui.mode;
+        g_app.arp_ui.mode = nk_combo(ctx, arp_modes, 5, g_app.arp_ui.mode, 24, nk_vec2(200, 140));
+        if (g_app.arp_ui.mode != prev_arp_mode) {
+            param_queue_push(PARAM_ARP_MODE, (float)g_app.arp_ui.mode);
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_fx_panel(struct nk_context* ctx) {
+    nk_layout_row_dynamic(ctx, 150, 3);
+    draw_distortion_card(ctx);
+    draw_chorus_card(ctx);
+    draw_delay_card(ctx);
+
+    nk_layout_row_dynamic(ctx, 150, 2);
+    draw_reverb_card(ctx);
+    draw_compressor_card(ctx);
+}
+
+static void draw_loop_panel(struct nk_context* ctx) {
+    nk_flags flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+
+    nk_layout_row_dynamic(ctx, 130, 1);
+    if (nk_group_begin_titled(ctx, "LOOP_CTRL", "Loop Controls", flags)) {
+        nk_layout_row_dynamic(ctx, 28, 4);
+        if (nk_button_label(ctx, g_app.loop_recorder.playing ? "⏸ PLAY" : "▶ PLAY")) {
+            if (g_app.loop_recorder.playing) {
+                loop_recorder_stop_playback(&g_app.loop_recorder, &g_app.synth);
+            } else {
+                loop_recorder_start_playback(&g_app.loop_recorder);
+            }
+        }
+
+        struct nk_style_button rec_style = ctx->style.button;
+        if (g_app.loop_recorder.recording) {
+            rec_style.normal.data.color = nk_rgb(200, 40, 40);
+            rec_style.hover.data.color = nk_rgb(230, 70, 70);
+        }
+        if (nk_button_label_styled(ctx, &rec_style, g_app.loop_recorder.recording ? "🔴 REC" : "⚫ REC")) {
+            if (g_app.loop_recorder.recording) {
+                loop_recorder_stop_recording(&g_app.loop_recorder, &g_app.synth);
+            } else {
+                loop_recorder_start_recording(&g_app.loop_recorder);
+            }
+        }
+
+        if (nk_button_label(ctx, "🗑 CLEAR")) {
+            loop_recorder_clear(&g_app.loop_recorder, &g_app.synth);
+        }
+
+        if (nk_button_label(ctx, "PANIC")) {
+            param_queue_push(PARAM_PANIC, 0.0f);
+        }
+
+        Loop* loop = &g_app.loop_recorder.loops[g_app.loop_recorder.current_loop];
+        nk_layout_row_dynamic(ctx, 18, 2);
+        char info[64];
+        snprintf(info, sizeof(info), "%s", loop->name);
+        nk_label(ctx, "Loop", NK_TEXT_LEFT);
+        nk_label(ctx, info, NK_TEXT_RIGHT);
+
+        snprintf(info, sizeof(info), "%d events", loop->num_events);
+        nk_label(ctx, "Events", NK_TEXT_LEFT);
+        nk_label(ctx, info, NK_TEXT_RIGHT);
+
+        snprintf(info, sizeof(info), "%.2fs", loop->loop_length);
+        nk_label(ctx, "Length", NK_TEXT_LEFT);
+        nk_label(ctx, info, NK_TEXT_RIGHT);
+
+        double normalized = (loop->loop_length > 0.0) ? g_app.loop_recorder.loop_position / loop->loop_length : 0.0;
+        if (normalized < 0.0) normalized = 0.0;
+        if (normalized > 1.0) normalized = 1.0;
+        nk_size progress = (nk_size)(normalized * 1000.0);
+        nk_layout_row_dynamic(ctx, 14, 1);
+        nk_progress(ctx, &progress, 1000, NK_FIXED);
+
+        nk_layout_row_dynamic(ctx, 32, 1);
+        if (g_app.loop_recorder.recording) {
+            nk_label_wrap(ctx, "Recording: play the keyboard to capture a loop.");
+        } else if (g_app.loop_recorder.playing) {
+            nk_label_wrap(ctx, "Playing back your captured notes.");
+        } else {
+            nk_label_wrap(ctx, "Tip: Hit REC, play a chord progression, then press PLAY.");
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_drums_panel(struct nk_context* ctx) {
+    nk_flags flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+    nk_layout_row_dynamic(ctx, 40, 3);
+    if (nk_button_label(ctx, g_app.drums.playing ? "⏸ DRUMS" : "▶ DRUMS")) {
+        g_app.drums.playing = !g_app.drums.playing;
+    }
+    char step_info[64];
+    snprintf(step_info, sizeof(step_info), "Step %d / %d", g_app.drums.current_step + 1, DRUM_STEPS);
+    nk_label(ctx, step_info, NK_TEXT_CENTERED);
+    nk_label(ctx, "Toggle steps to build your beat", NK_TEXT_LEFT);
+
+    nk_layout_row_dynamic(ctx, 200, 1);
+    if (nk_group_begin_titled(ctx, "DRUM_GRID", "Step Grid", flags)) {
+        const char* drum_names[] = {"KICK", "SNARE", "CL-HH", "OP-HH", "CLAP", "TOM-H", "TOM-M", "TOM-L"};
+        DrumPattern* dpat = &g_app.drums.patterns[g_app.drums.current_pattern];
+        int current_step = g_app.drums.current_step;
+        for (int d = 0; d < DRUM_VOICES; d++) {
+            nk_layout_row_begin(ctx, NK_STATIC, 22, 17);
+            nk_layout_row_push(ctx, 70);
+            nk_label(ctx, drum_names[d], NK_TEXT_LEFT);
+            for (int s = 0; s < DRUM_STEPS; s++) {
+                nk_layout_row_push(ctx, 24);
+                struct nk_style_button style = ctx->style.button;
+                if (s == current_step && g_app.drums.playing) {
+                    style.normal.data.color = nk_rgb(255, 200, 0);
+                    style.hover.data.color = nk_rgb(255, 220, 80);
+                } else if (dpat->steps[d][s]) {
+                    style.normal.data.color = nk_rgb(90, 170, 110);
+                    style.hover.data.color = nk_rgb(110, 200, 140);
+                }
+                if (nk_button_label_styled(ctx, &style, dpat->steps[d][s] ? "●" : "○")) {
+                    dpat->steps[d][s] = !dpat->steps[d][s];
+                }
+            }
+            nk_layout_row_end(ctx);
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_sample_loader_panel(struct nk_context* ctx) {
+    nk_flags flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+    if (nk_group_begin_titled(ctx, "SAMPLE_PANEL", "Sample Loader", flags)) {
+        nk_layout_row_dynamic(ctx, 18, 1);
+        nk_label(ctx, "WAV File", NK_TEXT_LEFT);
+        nk_layout_row_dynamic(ctx, 26, 1);
+        nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, g_app.sample_path_input,
+                                       sizeof(g_app.sample_path_input), nk_filter_default);
+
+        nk_layout_row_dynamic(ctx, 26, 3);
+        if (nk_button_label(ctx, "Load")) {
+            load_sample_file(g_app.sample_path_input);
+        }
+        if (nk_button_label(ctx, "Play")) {
+            atomic_store(&g_app.sampler.trigger_pending, true);
+        }
+        if (nk_button_label(ctx, "Stop")) {
+            atomic_store(&g_app.sampler.stop_pending, true);
+        }
+
+        draw_status_text(ctx, "Status", g_app.sample_status);
+
+        if (g_app.sampler.buffer.data) {
+            char info[64];
+            double duration = (double)g_app.sampler.buffer.frame_count / (double)g_app.sampler.buffer.sample_rate;
+            snprintf(info, sizeof(info), "%.2fs", duration);
+            draw_status_text(ctx, "Duration", info);
+            snprintf(info, sizeof(info), "%u ch @ %u Hz", g_app.sampler.buffer.channels, g_app.sampler.buffer.sample_rate);
+            draw_status_text(ctx, "Format", info);
+        }
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_export_panel(struct nk_context* ctx) {
+    nk_flags flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+    if (nk_group_begin_titled(ctx, "EXPORT_PANEL", "Audio Export", flags)) {
+        nk_layout_row_dynamic(ctx, 18, 1);
+        nk_label(ctx, "Output Path", NK_TEXT_LEFT);
+        nk_layout_row_dynamic(ctx, 26, 1);
+        nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, g_app.export_path_input,
+                                       sizeof(g_app.export_path_input), nk_filter_default);
+
+        nk_layout_row_dynamic(ctx, 24, 1);
+        nk_property_float(ctx, "Length (s)", 1.0f, &g_app.export_duration_seconds, 60.0f, 0.5f, 0.1f);
+
+        nk_layout_row_dynamic(ctx, 28, 1);
+        if (nk_button_label(ctx, "Render to WAV")) {
+            start_export_job(g_app.export_duration_seconds, g_app.export_path_input);
+        }
+
+        bool exporting = atomic_load(&g_app.export_state.capture_active) || atomic_load(&g_app.export_state.arm_request);
+        draw_status_text(ctx, "Recorder", exporting ? "Recording..." : "Ready");
+        draw_status_text(ctx, "Result", g_app.export_status);
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_performance_panel(struct nk_context* ctx) {
+    nk_flags flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+
+    nk_layout_row_dynamic(ctx, 130, 1);
+    if (nk_group_begin_titled(ctx, "PERF_STATUS", "Session Status", flags)) {
+        char tempo_text[32];
+        snprintf(tempo_text, sizeof(tempo_text), "%.1f BPM", g_app.tempo);
+        draw_status_text(ctx, "Tempo", tempo_text);
+
+        Loop* loop = &g_app.loop_recorder.loops[g_app.loop_recorder.current_loop];
+        char loop_text[64];
+        snprintf(loop_text, sizeof(loop_text), "%s | %d events", loop->name, loop->num_events);
+        draw_status_text(ctx, "Loop", loop_text);
+
+        snprintf(loop_text, sizeof(loop_text), "Len %.2fs", loop->loop_length);
+        draw_status_text(ctx, "Loop Length", loop_text);
+
+        draw_status_text(ctx, "Sample", g_app.sample_status);
+        draw_status_text(ctx, "Export", g_app.export_status);
+        nk_group_end(ctx);
+    }
+
+    nk_layout_row_dynamic(ctx, 70, 1);
+    if (nk_group_begin_titled(ctx, "PERF_TIPS", "Quick Tips", flags)) {
+        nk_layout_row_dynamic(ctx, 16, 1);
+        nk_label_wrap(ctx, "Space = loop toggle\nESC = panic\nDrag across the keyboard to glide notes");
+        nk_group_end(ctx);
+    }
+}
+
+static void draw_transport_bar(struct nk_context* ctx) {
+    nk_layout_row_dynamic(ctx, 90, 1);
+    nk_flags flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+    if (nk_group_begin_titled(ctx, "TRANSPORT", "Global Controls", flags)) {
+        nk_layout_row_dynamic(ctx, 36, 6);
+        if (nk_button_label(ctx, g_app.loop_recorder.playing ? "⏸ Loop" : "▶ Loop")) {
+            if (g_app.loop_recorder.playing) {
+                loop_recorder_stop_playback(&g_app.loop_recorder, &g_app.synth);
+            } else {
+                loop_recorder_start_playback(&g_app.loop_recorder);
+            }
+        }
+
+        struct nk_style_button rec_style = ctx->style.button;
+        if (g_app.loop_recorder.recording) {
+            rec_style.normal.data.color = nk_rgb(200, 40, 40);
+            rec_style.hover.data.color = nk_rgb(230, 70, 70);
+        }
+        if (nk_button_label_styled(ctx, &rec_style, g_app.loop_recorder.recording ? "REC" : "● REC")) {
+            if (g_app.loop_recorder.recording) {
+                loop_recorder_stop_recording(&g_app.loop_recorder, &g_app.synth);
+            } else {
+                loop_recorder_start_recording(&g_app.loop_recorder);
+            }
+        }
+
+        if (nk_button_label(ctx, g_app.drums.playing ? "⏸ Drums" : "▶ Drums")) {
+            g_app.drums.playing = !g_app.drums.playing;
+        }
+
+        if (nk_button_label(ctx, "▶ Sample")) {
+            atomic_store(&g_app.sampler.trigger_pending, true);
+        }
+        if (nk_button_label(ctx, "■ Sample")) {
+            atomic_store(&g_app.sampler.stop_pending, true);
+        }
+        if (nk_button_label(ctx, "PANIC")) {
+            param_queue_push(PARAM_PANIC, 0.0f);
+        }
+
+        nk_layout_row_dynamic(ctx, 30, 3);
+        nk_label(ctx, "Tempo", NK_TEXT_LEFT);
+        float prev_tempo = g_app.tempo_ui;
+        nk_slider_float(ctx, 60.0f, &g_app.tempo_ui, 200.0f, 0.5f);
+        if (fabsf(g_app.tempo_ui - prev_tempo) > 0.01f) {
+            param_queue_push(PARAM_TEMPO, g_app.tempo_ui);
+        }
+        char tempo_text[32];
+        snprintf(tempo_text, sizeof(tempo_text), "%.1f BPM", g_app.tempo_ui);
+        nk_label(ctx, tempo_text, NK_TEXT_RIGHT);
+
+        draw_status_text(ctx, "Sample", g_app.sample_status);
+        draw_status_text(ctx, "Export", g_app.export_status);
+
+        nk_group_end(ctx);
+    }
+    nk_layout_row_dynamic(ctx, 8, 1);
+    nk_label(ctx, "", NK_TEXT_LEFT);
+}
+
+static void draw_fx_panel(struct nk_context* ctx);
+static void draw_loop_panel(struct nk_context* ctx);
+static void draw_drums_panel(struct nk_context* ctx);
 
 static void apply_param_change(const ParamChange* change, void* userdata) {
     (void)userdata;
@@ -917,9 +2108,11 @@ static void apply_param_change(const ParamChange* change, void* userdata) {
                 g_app.arp.last_played_note = -1;
             }
             break;
-        case PARAM_ARP_RATE:
-            g_app.arp.rate = fmaxf(0.1f, value);
-            break;
+        case PARAM_ARP_RATE: {
+                int idx = arp_multiplier_index_for_value(value);
+                g_app.arp.rate = arp_multiplier_value(idx);
+                break;
+            }
         case PARAM_ARP_MODE: {
                 int mode = (int)(value + 0.5f);
                 if (mode < ARP_OFF) mode = ARP_OFF;
@@ -985,6 +2178,104 @@ static void apply_param_change(const ParamChange* change, void* userdata) {
                 }
                 break;
             }
+        case PARAM_PANIC:
+            synth_all_notes_off(&g_app.synth);
+            g_app.arp.num_held = 0;
+            g_app.arp.last_played_note = -1;
+            memset(g_app.keyboard_ui.note_active, 0, sizeof(g_app.keyboard_ui.note_active));
+            g_app.keyboard_ui.mouse_dragging = false;
+            g_app.keyboard_ui.mouse_active_note = -1;
+            break;
+        default:
+            break;
+    }
+}
+
+static void dispatch_note_on(uint8_t note, float velocity) {
+    if (g_app.arp.enabled) {
+        arp_note_on(&g_app.arp, note);
+    } else {
+        synth_note_on(&g_app.synth, note, velocity);
+    }
+}
+
+static void dispatch_note_off(uint8_t note) {
+    if (g_app.arp.enabled) {
+        arp_note_off(&g_app.arp, note);
+    } else {
+        synth_note_off(&g_app.synth, note);
+    }
+}
+
+static void keyboard_set_note_active(uint8_t note, bool down) {
+    if (note < 128) {
+        g_app.keyboard_ui.note_active[note] = down;
+    }
+}
+
+static void ui_note_on(uint8_t note) {
+    if (note >= 128) return;
+    if (g_app.keyboard_ui.note_active[note]) return;
+    keyboard_set_note_active(note, true);
+    if (g_app.loop_recorder.recording) {
+        loop_recorder_record_note_on(&g_app.loop_recorder, note, 1.0f);
+    }
+    midi_queue_send_note_on(note, 110);
+}
+
+static void ui_note_off(uint8_t note) {
+    if (note >= 128) return;
+    if (!g_app.keyboard_ui.note_active[note]) return;
+    keyboard_set_note_active(note, false);
+    if (g_app.loop_recorder.recording) {
+        loop_recorder_record_note_off(&g_app.loop_recorder, note);
+    }
+    midi_queue_send_note_off(note);
+}
+
+static void handle_midi_event(const MidiEvent* event, void* userdata) {
+    (void)userdata;
+    if (!event) {
+        return;
+    }
+
+    switch (event->type) {
+        case MIDI_EVENT_NOTE_ON: {
+            float velocity = (float)event->data2 / 127.0f;
+            if (velocity <= 0.0f) {
+                keyboard_set_note_active(event->data1, false);
+                dispatch_note_off(event->data1);
+            } else {
+                keyboard_set_note_active(event->data1, true);
+                dispatch_note_on(event->data1, velocity);
+            }
+            break;
+        }
+        case MIDI_EVENT_NOTE_OFF:
+            keyboard_set_note_active(event->data1, false);
+            dispatch_note_off(event->data1);
+            break;
+        case MIDI_EVENT_PITCH_BEND: {
+            uint16_t value = ((uint16_t)event->data2 << 7) | event->data1;
+            float amount = ((float)value - 8192.0f) / 8192.0f;
+            synth_pitch_bend(&g_app.synth, amount);
+            break;
+        }
+        case MIDI_EVENT_CONTROL_CHANGE: {
+            // Map common CCs to parameters (e.g., CC1 = filter cutoff)
+            if (event->data1 == 1) { // Mod wheel → filter cutoff sweep
+                float normalized = (float)event->data2 / 127.0f;
+                float cutoff = 200.0f + normalized * 19800.0f;
+                param_queue_push(PARAM_FILTER_CUTOFF, cutoff);
+            } else if (event->data1 == 74) { // CC74 often "brightness"
+                float normalized = (float)event->data2 / 127.0f;
+                float resonance = normalized;
+                param_queue_push(PARAM_FILTER_RESONANCE, resonance);
+            }
+            break;
+        }
+        case MIDI_EVENT_AFTERTOUCH:
+        case MIDI_EVENT_PROGRAM_CHANGE:
         default:
             break;
     }
@@ -995,44 +2286,54 @@ static void apply_param_change(const ParamChange* change, void* userdata) {
 // ============================================================================
 
 void audio_callback(ma_device* device, void* output, const void* input, ma_uint32 frameCount) {
+    (void)device;
     float* out = (float*)output;
     (void)input;
     
     double sample_duration = 1.0 / g_app.synth.sample_rate;
     param_queue_drain(apply_param_change, NULL);
+    midi_queue_drain(handle_midi_event, NULL);
     
     for (ma_uint32 i = 0; i < frameCount; i++) {
         // Process loop recorder
         loop_recorder_process(&g_app.loop_recorder, &g_app.synth, sample_duration);
         
-        // Process drum machine
-        drum_machine_process(&g_app.drums, g_app.current_time, g_app.tempo);
+    // Process drum machine
+    drum_machine_process(&g_app.drums, g_app.current_time, g_app.tempo);
         
-        // Process arpeggiator
-        arp_process(&g_app.arp, &g_app.synth, g_app.current_time, g_app.tempo);
+    // Process arpeggiator
+    arp_process(&g_app.arp, &g_app.synth, g_app.current_time, g_app.tempo);
         
-        // Generate synth audio
-        float temp_buffer[2];
-        synth_process(&g_app.synth, temp_buffer, 1);
-        float left = temp_buffer[0];
-        float right = temp_buffer[1];
+    // Generate synth audio
+    float temp_buffer[2];
+    synth_process(&g_app.synth, temp_buffer, 1);
+    float left = temp_buffer[0];
+    float right = temp_buffer[1];
+
+    // Mix sampler playback (shares FX with synth voices)
+    sample_slot_mix(&g_app.sampler, g_app.synth.sample_rate, &left, &right);
+
+    // Keep drums dry: render now but sum after the FX chain
+    float drums = drum_machine_render(&g_app.drums);
         
-        // Add drum machine
-        float drums = drum_machine_render(&g_app.drums);
-        left += drums;
-        right += drums;
-        
-        // Apply effects
-        fx_distortion_process(&g_app.fx.distortion, &left, &right);
-        fx_chorus_process(&g_app.fx.chorus, &left, &right, g_app.synth.sample_rate);
-        fx_delay_process(&g_app.fx.delay, &left, &right, g_app.synth.sample_rate);
-        fx_reverb_process(&g_app.fx.reverb, &left, &right);
-        fx_compressor_process(&g_app.fx.compressor, &left, &right, g_app.synth.sample_rate);
+    // Apply effects to synth/sampler bus only
+    fx_distortion_process(&g_app.fx.distortion, &left, &right);
+    fx_chorus_process(&g_app.fx.chorus, &left, &right, g_app.synth.sample_rate);
+    fx_delay_process(&g_app.fx.delay, &left, &right, g_app.synth.sample_rate);
+    fx_reverb_process(&g_app.fx.reverb, &left, &right);
+    fx_compressor_process(&g_app.fx.compressor, &left, &right, g_app.synth.sample_rate);
+
+    // Finally add drums post-FX so their tone stays dry
+    left += drums;
+    right += drums;
         
         // Master volume
         left *= g_app.master_volume;
         right *= g_app.master_volume;
         
+        // Capture export buffer if requested
+        sample_export_process_frame(&g_app.export_state, left, right);
+
         out[i * 2 + 0] = left;
         out[i * 2 + 1] = right;
         
@@ -1045,462 +2346,49 @@ void audio_callback(ma_device* device, void* output, const void* input, ma_uint3
 // ============================================================================
 
 void draw_gui(struct nk_context* ctx) {
-    const char* tab_names[] = {"SYNTH", "FX", "SEQUENCER", "DRUMS", "PRESETS"};
-    
+    ui_apply_theme(ctx);
+
     if (nk_begin(ctx, "Professional Synthesizer", nk_rect(0, 0, 1600, 900),
                  NK_WINDOW_NO_SCROLLBAR)) {
-        
-        // Tab bar
-        nk_layout_row_static(ctx, 30, 150, 5);
-        for (int i = 0; i < 5; i++) {
-            if (nk_button_label(ctx, tab_names[i])) {
-                g_app.active_tab = i;
-            }
+        draw_transport_bar(ctx);
+
+    nk_layout_row_dynamic(ctx, 380, 3);
+        nk_flags column_flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+        if (nk_group_begin_titled(ctx, "COL_SYNTH", "Synth Engine", column_flags)) {
+            draw_synth_panel(ctx);
+            nk_group_end(ctx);
         }
-        
-        nk_layout_row_dynamic(ctx, 5, 1);
+        if (nk_group_begin_titled(ctx, "COL_FX", "Effects Rack", column_flags)) {
+            draw_fx_panel(ctx);
+            nk_group_end(ctx);
+        }
+        if (nk_group_begin_titled(ctx, "COL_RHYTHM", "Groove Lab", column_flags)) {
+            draw_loop_panel(ctx);
+            nk_layout_row_dynamic(ctx, 8, 1);
+            nk_label(ctx, "", NK_TEXT_LEFT);
+            draw_drums_panel(ctx);
+            nk_group_end(ctx);
+        }
+
+    nk_layout_row_dynamic(ctx, 6, 1);
         nk_label(ctx, "", NK_TEXT_LEFT);
-        
-        // Content based on active tab
-        switch (g_app.active_tab) {
-            case 0: { // SYNTH
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ SYNTH ENGINE ═══", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Master Volume:", NK_TEXT_LEFT);
-                float prev_master = g_app.master_volume_ui;
-                nk_slider_float(ctx, 0.0f, &g_app.master_volume_ui, 1.0f, 0.01f);
-                if (fabsf(g_app.master_volume_ui - prev_master) > 0.0001f) {
-                    param_queue_push(PARAM_MASTER_VOLUME, g_app.master_volume_ui);
-                }
-                
-                // Voice count display
-                nk_layout_row_dynamic(ctx, 25, 1);
-                char voice_text[64];
-                snprintf(voice_text, sizeof(voice_text), "Active Voices: %d / 8", 
-                        g_app.synth.num_active_voices);
-                nk_label(ctx, voice_text, NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 5, 1);
-                nk_label(ctx, "", NK_TEXT_LEFT);
 
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ FILTER ═══", NK_TEXT_CENTERED);
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Cutoff (Hz):", NK_TEXT_LEFT);
-                float prev_cutoff = g_app.filter_cutoff;
-                nk_slider_float(ctx, 20.0f, &g_app.filter_cutoff, 20000.0f, 10.0f);
-                if (fabsf(g_app.filter_cutoff - prev_cutoff) > 1.0f) {
-                    param_queue_push(PARAM_FILTER_CUTOFF, g_app.filter_cutoff);
-                }
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Resonance:", NK_TEXT_LEFT);
-                float prev_res = g_app.filter_resonance;
-                nk_slider_float(ctx, 0.0f, &g_app.filter_resonance, 1.0f, 0.01f);
-                if (fabsf(g_app.filter_resonance - prev_res) > 0.0001f) {
-                    param_queue_push(PARAM_FILTER_RESONANCE, g_app.filter_resonance);
-                }
-
-                const char* filter_modes[] = {"LP", "HP", "BP", "Notch", "Allpass"};
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Mode:", NK_TEXT_LEFT);
-                int prev_filter_mode = (int)g_app.filter_mode;
-                int selected_mode = nk_combo(ctx, filter_modes, 5, prev_filter_mode, 25, nk_vec2(200, 200));
-                if (selected_mode != prev_filter_mode) {
-                    g_app.filter_mode = (FilterMode)selected_mode;
-                    param_queue_push(PARAM_FILTER_MODE, (float)selected_mode);
-                }
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Env Amount:", NK_TEXT_LEFT);
-                float prev_env_amt = g_app.filter_env;
-                nk_slider_float(ctx, -1.0f, &g_app.filter_env, 1.0f, 0.01f);
-                if (fabsf(g_app.filter_env - prev_env_amt) > 0.0001f) {
-                    param_queue_push(PARAM_FILTER_ENV_AMOUNT, g_app.filter_env);
-                }
-
-                nk_layout_row_dynamic(ctx, 10, 1);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ AMP ENVELOPE ═══", NK_TEXT_CENTERED);
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Attack:", NK_TEXT_LEFT);
-                float prev_attack = g_app.env_attack;
-                nk_slider_float(ctx, 0.001f, &g_app.env_attack, 2.0f, 0.001f);
-                if (fabsf(g_app.env_attack - prev_attack) > 0.0001f) {
-                    param_queue_push(PARAM_ENV_ATTACK, g_app.env_attack);
-                }
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Decay:", NK_TEXT_LEFT);
-                float prev_decay = g_app.env_decay;
-                nk_slider_float(ctx, 0.001f, &g_app.env_decay, 2.0f, 0.001f);
-                if (fabsf(g_app.env_decay - prev_decay) > 0.0001f) {
-                    param_queue_push(PARAM_ENV_DECAY, g_app.env_decay);
-                }
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Sustain:", NK_TEXT_LEFT);
-                float prev_sustain = g_app.env_sustain;
-                nk_slider_float(ctx, 0.0f, &g_app.env_sustain, 1.0f, 0.01f);
-                if (fabsf(g_app.env_sustain - prev_sustain) > 0.0001f) {
-                    param_queue_push(PARAM_ENV_SUSTAIN, g_app.env_sustain);
-                }
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Release:", NK_TEXT_LEFT);
-                float prev_release = g_app.env_release;
-                nk_slider_float(ctx, 0.001f, &g_app.env_release, 5.0f, 0.001f);
-                if (fabsf(g_app.env_release - prev_release) > 0.0001f) {
-                    param_queue_push(PARAM_ENV_RELEASE, g_app.env_release);
-                }
-
-                nk_layout_row_dynamic(ctx, 5, 1);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ ARPEGGIATOR ═══", NK_TEXT_CENTERED);
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Enable:", NK_TEXT_LEFT);
-                nk_bool prev_arp_enabled = g_app.arp_ui.enabled;
-                nk_checkbox_label(ctx, "Enabled", &g_app.arp_ui.enabled);
-                if (prev_arp_enabled != g_app.arp_ui.enabled) {
-                    param_queue_push(PARAM_ARP_ENABLED, g_app.arp_ui.enabled ? 1.0f : 0.0f);
-                }
-
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Rate (steps/sec):", NK_TEXT_LEFT);
-                float prev_arp_rate = g_app.arp_ui.rate;
-                nk_slider_float(ctx, 0.25f, &g_app.arp_ui.rate, 16.0f, 0.05f);
-                if (fabsf(g_app.arp_ui.rate - prev_arp_rate) > 0.0001f) {
-                    param_queue_push(PARAM_ARP_RATE, g_app.arp_ui.rate);
-                }
-
-                const char* arp_modes[] = {"Off", "Up", "Down", "Up-Down", "Random"};
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Mode:", NK_TEXT_LEFT);
-                int prev_arp_mode = g_app.arp_ui.mode;
-                g_app.arp_ui.mode = nk_combo(ctx, arp_modes, 5, g_app.arp_ui.mode, 25, nk_vec2(200, 200));
-                if (g_app.arp_ui.mode != prev_arp_mode) {
-                    param_queue_push(PARAM_ARP_MODE, (float)g_app.arp_ui.mode);
-                }
-                
-                break;
-            }
-            
-            case 1: { // FX
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ EFFECTS RACK ═══", NK_TEXT_CENTERED);
-                
-                // Distortion
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_bool prev_dist_enabled = g_app.fx_ui.distortion.enabled;
-                nk_checkbox_label(ctx, "Distortion", &g_app.fx_ui.distortion.enabled);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                if (prev_dist_enabled != g_app.fx_ui.distortion.enabled) {
-                    param_queue_push(PARAM_FX_DISTORTION_ENABLED, g_app.fx_ui.distortion.enabled ? 1.0f : 0.0f);
-                }
-                
-                if (g_app.fx_ui.distortion.enabled) {
-                    nk_label(ctx, "Drive:", NK_TEXT_LEFT);
-                    float prev_drive = g_app.fx_ui.distortion.drive;
-                    nk_slider_float(ctx, 1.0f, &g_app.fx_ui.distortion.drive, 20.0f, 0.1f);
-                    if (fabsf(g_app.fx_ui.distortion.drive - prev_drive) > 0.0001f) {
-                        param_queue_push(PARAM_FX_DISTORTION_DRIVE, g_app.fx_ui.distortion.drive);
-                    }
-                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-                    float prev_mix = g_app.fx_ui.distortion.mix;
-                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.distortion.mix, 1.0f, 0.01f);
-                    if (fabsf(g_app.fx_ui.distortion.mix - prev_mix) > 0.0001f) {
-                        param_queue_push(PARAM_FX_DISTORTION_MIX, g_app.fx_ui.distortion.mix);
-                    }
-                }
-                
-                nk_layout_row_dynamic(ctx, 5, 1);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                
-                // Chorus
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_bool prev_chorus_enabled = g_app.fx_ui.chorus.enabled;
-                nk_checkbox_label(ctx, "Chorus", &g_app.fx_ui.chorus.enabled);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                if (prev_chorus_enabled != g_app.fx_ui.chorus.enabled) {
-                    param_queue_push(PARAM_FX_CHORUS_ENABLED, g_app.fx_ui.chorus.enabled ? 1.0f : 0.0f);
-                }
-                
-                if (g_app.fx_ui.chorus.enabled) {
-                    nk_label(ctx, "Rate:", NK_TEXT_LEFT);
-                    float prev_rate = g_app.fx_ui.chorus.rate;
-                    nk_slider_float(ctx, 0.1f, &g_app.fx_ui.chorus.rate, 5.0f, 0.1f);
-                    if (fabsf(g_app.fx_ui.chorus.rate - prev_rate) > 0.0001f) {
-                        param_queue_push(PARAM_FX_CHORUS_RATE, g_app.fx_ui.chorus.rate);
-                    }
-                    nk_label(ctx, "Depth:", NK_TEXT_LEFT);
-                    float prev_depth = g_app.fx_ui.chorus.depth;
-                    nk_slider_float(ctx, 1.0f, &g_app.fx_ui.chorus.depth, 50.0f, 1.0f);
-                    if (fabsf(g_app.fx_ui.chorus.depth - prev_depth) > 0.0001f) {
-                        param_queue_push(PARAM_FX_CHORUS_DEPTH, g_app.fx_ui.chorus.depth);
-                    }
-                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-                    float prev_chorus_mix = g_app.fx_ui.chorus.mix;
-                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.chorus.mix, 1.0f, 0.01f);
-                    if (fabsf(g_app.fx_ui.chorus.mix - prev_chorus_mix) > 0.0001f) {
-                        param_queue_push(PARAM_FX_CHORUS_MIX, g_app.fx_ui.chorus.mix);
-                    }
-                }
-                
-                nk_layout_row_dynamic(ctx, 5, 1);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                
-                // Compressor
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_bool prev_comp_enabled = g_app.fx_ui.compressor.enabled;
-                nk_checkbox_label(ctx, "Compressor", &g_app.fx_ui.compressor.enabled);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                if (prev_comp_enabled != g_app.fx_ui.compressor.enabled) {
-                    param_queue_push(PARAM_FX_COMP_ENABLED, g_app.fx_ui.compressor.enabled ? 1.0f : 0.0f);
-                }
-                
-                if (g_app.fx_ui.compressor.enabled) {
-                    nk_label(ctx, "Threshold:", NK_TEXT_LEFT);
-                    float prev_thresh = g_app.fx_ui.compressor.threshold;
-                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.compressor.threshold, 1.0f, 0.01f);
-                    if (fabsf(g_app.fx_ui.compressor.threshold - prev_thresh) > 0.0001f) {
-                        param_queue_push(PARAM_FX_COMP_THRESHOLD, g_app.fx_ui.compressor.threshold);
-                    }
-                    nk_label(ctx, "Ratio:", NK_TEXT_LEFT);
-                    float prev_ratio = g_app.fx_ui.compressor.ratio;
-                    nk_slider_float(ctx, 1.0f, &g_app.fx_ui.compressor.ratio, 20.0f, 0.1f);
-                    if (fabsf(g_app.fx_ui.compressor.ratio - prev_ratio) > 0.0001f) {
-                        param_queue_push(PARAM_FX_COMP_RATIO, g_app.fx_ui.compressor.ratio);
-                    }
-                }
-
-                nk_layout_row_dynamic(ctx, 5, 1);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-
-                // Delay
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_bool prev_delay_enabled = g_app.fx_ui.delay.enabled;
-                nk_checkbox_label(ctx, "Delay", &g_app.fx_ui.delay.enabled);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                if (prev_delay_enabled != g_app.fx_ui.delay.enabled) {
-                    param_queue_push(PARAM_FX_DELAY_ENABLED, g_app.fx_ui.delay.enabled ? 1.0f : 0.0f);
-                }
-
-                if (g_app.fx_ui.delay.enabled) {
-                    nk_label(ctx, "Time (s):", NK_TEXT_LEFT);
-                    float prev_delay_time = g_app.fx_ui.delay.time;
-                    nk_slider_float(ctx, 0.05f, &g_app.fx_ui.delay.time, 2.0f, 0.01f);
-                    if (fabsf(g_app.fx_ui.delay.time - prev_delay_time) > 0.0001f) {
-                        param_queue_push(PARAM_FX_DELAY_TIME, g_app.fx_ui.delay.time);
-                    }
-                    nk_label(ctx, "Feedback:", NK_TEXT_LEFT);
-                    float prev_feedback = g_app.fx_ui.delay.feedback;
-                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.feedback, 0.95f, 0.01f);
-                    if (fabsf(g_app.fx_ui.delay.feedback - prev_feedback) > 0.0001f) {
-                        param_queue_push(PARAM_FX_DELAY_FEEDBACK, g_app.fx_ui.delay.feedback);
-                    }
-                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-                    float prev_delay_mix = g_app.fx_ui.delay.mix;
-                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.mix, 1.0f, 0.01f);
-                    if (fabsf(g_app.fx_ui.delay.mix - prev_delay_mix) > 0.0001f) {
-                        param_queue_push(PARAM_FX_DELAY_MIX, g_app.fx_ui.delay.mix);
-                    }
-                }
-
-                nk_layout_row_dynamic(ctx, 5, 1);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-
-                // Reverb
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_bool prev_reverb_enabled = g_app.fx_ui.reverb.enabled;
-                nk_checkbox_label(ctx, "Reverb", &g_app.fx_ui.reverb.enabled);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                if (prev_reverb_enabled != g_app.fx_ui.reverb.enabled) {
-                    param_queue_push(PARAM_FX_REVERB_ENABLED, g_app.fx_ui.reverb.enabled ? 1.0f : 0.0f);
-                }
-
-                if (g_app.fx_ui.reverb.enabled) {
-                    nk_label(ctx, "Size:", NK_TEXT_LEFT);
-                    float prev_size = g_app.fx_ui.reverb.size;
-                    nk_slider_float(ctx, 0.1f, &g_app.fx_ui.reverb.size, 0.9f, 0.01f);
-                    if (fabsf(g_app.fx_ui.reverb.size - prev_size) > 0.0001f) {
-                        param_queue_push(PARAM_FX_REVERB_SIZE, g_app.fx_ui.reverb.size);
-                    }
-                    nk_label(ctx, "Damping:", NK_TEXT_LEFT);
-                    float prev_damping = g_app.fx_ui.reverb.damping;
-                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.reverb.damping, 0.99f, 0.01f);
-                    if (fabsf(g_app.fx_ui.reverb.damping - prev_damping) > 0.0001f) {
-                        param_queue_push(PARAM_FX_REVERB_DAMPING, g_app.fx_ui.reverb.damping);
-                    }
-                    nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-                    float prev_reverb_mix = g_app.fx_ui.reverb.mix;
-                    nk_slider_float(ctx, 0.0f, &g_app.fx_ui.reverb.mix, 1.0f, 0.01f);
-                    if (fabsf(g_app.fx_ui.reverb.mix - prev_reverb_mix) > 0.0001f) {
-                        param_queue_push(PARAM_FX_REVERB_MIX, g_app.fx_ui.reverb.mix);
-                    }
-                }
-                
-                break;
-            }
-            
-            case 2: { // LOOP RECORDER
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ LOOP RECORDER ═══", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 30, 4);
-                
-                // Play/Stop button
-                if (nk_button_label(ctx, g_app.loop_recorder.playing ? "⏸ STOP" : "▶ PLAY")) {
-                    if (g_app.loop_recorder.playing) {
-                        loop_recorder_stop_playback(&g_app.loop_recorder, &g_app.synth);
-                    } else {
-                        loop_recorder_start_playback(&g_app.loop_recorder);
-                    }
-                }
-                
-                // Record button
-                struct nk_style_button rec_style = ctx->style.button;
-                if (g_app.loop_recorder.recording) {
-                    rec_style.normal.data.color = nk_rgb(255, 0, 0);  // Red when recording
-                    rec_style.hover.data.color = nk_rgb(255, 50, 50);
-                }
-                if (nk_button_label_styled(ctx, &rec_style, g_app.loop_recorder.recording ? "🔴 REC" : "⚫ REC")) {
-                    if (g_app.loop_recorder.recording) {
-                        loop_recorder_stop_recording(&g_app.loop_recorder, &g_app.synth);
-                    } else {
-                        loop_recorder_start_recording(&g_app.loop_recorder);
-                    }
-                }
-                
-                // Clear button
-                if (nk_button_label(ctx, "🗑 Clear")) {
-                    loop_recorder_clear(&g_app.loop_recorder, &g_app.synth);
-                }
-                
-                // Tempo control
-                nk_label(ctx, "BPM:", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Tempo:", NK_TEXT_LEFT);
-                float prev_tempo = g_app.tempo_ui;
-                nk_slider_float(ctx, 60.0f, &g_app.tempo_ui, 200.0f, 1.0f);
-                if (fabsf(g_app.tempo_ui - prev_tempo) > 0.001f) {
-                    param_queue_push(PARAM_TEMPO, g_app.tempo_ui);
-                }
-                
-                char tempo_text[64];
-                snprintf(tempo_text, sizeof(tempo_text), "%.0f BPM", g_app.tempo_ui);
-                nk_label(ctx, tempo_text, NK_TEXT_LEFT);
-                
-                // Loop info
-                Loop* loop = &g_app.loop_recorder.loops[g_app.loop_recorder.current_loop];
-                char loop_info[128];
-                snprintf(loop_info, sizeof(loop_info), "Loop: %s", loop->name);
-                nk_label(ctx, loop_info, NK_TEXT_LEFT);
-                
-                snprintf(loop_info, sizeof(loop_info), "Events: %d | Length: %.2fs", 
-                         loop->num_events, loop->loop_length);
-                nk_label(ctx, loop_info, NK_TEXT_LEFT);
-                
-                if (g_app.loop_recorder.playing || g_app.loop_recorder.recording) {
-                    snprintf(loop_info, sizeof(loop_info), "Position: %.2fs", 
-                             g_app.loop_recorder.loop_position);
-                    nk_label(ctx, loop_info, NK_TEXT_LEFT);
-                }
-                
-                // Instructions
-                nk_layout_row_dynamic(ctx, 40, 1);
-                if (g_app.loop_recorder.recording) {
-                    nk_label(ctx, "🔴 RECORDING: Play keyboard to record notes\nNotes sustain naturally until you release the keys", 
-                             NK_TEXT_CENTERED);
-                } else if (g_app.loop_recorder.playing) {
-                    nk_label(ctx, "▶ PLAYING: Loop is playing back your recording", 
-                             NK_TEXT_CENTERED);
-                } else {
-                    nk_label(ctx, "💡 Press REC and play keyboard to record a loop\nPress PLAY to hear your recording loop", 
-                             NK_TEXT_CENTERED);
-                }
-                
-                break;
-            }
-            
-            case 3: { // DRUMS
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ DRUM MACHINE ═══", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 30, 3);
-                if (nk_button_label(ctx, g_app.drums.playing ? "⏸ STOP" : "▶ PLAY")) {
-                    g_app.drums.playing = !g_app.drums.playing;
-                }
-                
-                char step_info[64];
-                snprintf(step_info, sizeof(step_info), "Step: %d/16", g_app.drums.current_step + 1);
-                nk_label(ctx, step_info, NK_TEXT_CENTERED);
-                nk_label(ctx, "", NK_TEXT_LEFT);
-                
-                // Drum grid with current step highlight
-                const char* drum_names[] = {"KICK", "SNARE", "CL-HH", "OP-HH", 
-                                           "CLAP", "TOM-H", "TOM-M", "TOM-L"};
-                
-                DrumPattern* dpat = &g_app.drums.patterns[g_app.drums.current_pattern];
-                int current_step = g_app.drums.current_step;
-                
-                for (int d = 0; d < DRUM_VOICES; d++) {
-                    nk_layout_row_begin(ctx, NK_STATIC, 30, 17);
-                    nk_layout_row_push(ctx, 60);
-                    nk_label(ctx, drum_names[d], NK_TEXT_LEFT);
-                    
-                    for (int s = 0; s < 16; s++) {
-                        nk_layout_row_push(ctx, 30);
-                        
-                        // Highlight current playing step
-                        struct nk_style_button style = ctx->style.button;
-                        if (s == current_step && g_app.drums.playing) {
-                            style.normal.data.color = nk_rgb(255, 200, 0);  // Yellow highlight
-                            style.hover.data.color = nk_rgb(255, 220, 50);
-                        } else if (dpat->steps[d][s]) {
-                            style.normal.data.color = nk_rgb(100, 200, 100);  // Green when active
-                            style.hover.data.color = nk_rgb(120, 220, 120);
-                        }
-                        
-                        if (nk_button_label_styled(ctx, &style, dpat->steps[d][s] ? "●" : "○")) {
-                            dpat->steps[d][s] = !dpat->steps[d][s];
-                            printf("🥁 Drum %s Step %d: %s\n", drum_names[d], s + 1, 
-                                   dpat->steps[d][s] ? "ON" : "OFF");
-                        }
-                    }
-                    nk_layout_row_end(ctx);
-                }
-                
-                nk_layout_row_dynamic(ctx, 20, 1);
-                nk_label(ctx, "💡 Click ● or ○ to toggle drum hits", NK_TEXT_CENTERED);
-                
-                break;
-            }
-            
-            case 4: { // PRESETS
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "═══ PRESET BROWSER ═══", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 25, 1);
-                nk_label(ctx, "Online preset library coming soon!", NK_TEXT_CENTERED);
-                nk_label(ctx, "Will feature:", NK_TEXT_LEFT);
-                nk_label(ctx, "• Download presets from GitHub", NK_TEXT_LEFT);
-                nk_label(ctx, "• Browse by category (Bass/Lead/Pad/Keys/FX)", NK_TEXT_LEFT);
-                nk_label(ctx, "• Search and filter", NK_TEXT_LEFT);
-                nk_label(ctx, "• Save and share your own presets", NK_TEXT_LEFT);
-                
-                break;
-            }
+    nk_layout_row_dynamic(ctx, 190, 3);
+        if (nk_group_begin_titled(ctx, "COL_SAMPLE", "Samples", column_flags)) {
+            draw_sample_loader_panel(ctx);
+            nk_group_end(ctx);
         }
+        if (nk_group_begin_titled(ctx, "COL_EXPORT", "Export", column_flags)) {
+            draw_export_panel(ctx);
+            nk_group_end(ctx);
+        }
+        if (nk_group_begin_titled(ctx, "COL_PERF", "Performance", column_flags)) {
+            draw_performance_panel(ctx);
+            nk_group_end(ctx);
+        }
+
+        nk_layout_row_dynamic(ctx, 200, 1);
+        draw_keyboard_panel(ctx);
     }
     nk_end(ctx);
 }
@@ -1542,6 +2430,24 @@ int main(void) {
     
     g_app.bg.r = 0.10f; g_app.bg.g = 0.18f;
     g_app.bg.b = 0.24f; g_app.bg.a = 1.0f;
+
+    sample_buffer_init(&g_app.sampler.buffer);
+    g_app.sampler.gain = 0.85f;
+    g_app.sampler.last_loaded_path[0] = '\0';
+    snprintf(g_app.sample_path_input, sizeof(g_app.sample_path_input),
+             "samples/demo.wav");
+    snprintf(g_app.export_path_input, sizeof(g_app.export_path_input),
+             "exports/bounce.wav");
+    g_app.export_duration_seconds = 8.0f;
+    snprintf(g_app.sample_status, sizeof(g_app.sample_status),
+             "No sample loaded");
+    snprintf(g_app.export_status, sizeof(g_app.export_status), "Idle");
+
+    g_app.keyboard_ui.base_note = 48;
+    g_app.keyboard_ui.num_keys = 36;
+    memset(g_app.keyboard_ui.note_active, 0, sizeof(g_app.keyboard_ui.note_active));
+    g_app.keyboard_ui.mouse_dragging = false;
+    g_app.keyboard_ui.mouse_active_note = -1;
     
     // Initialize synth engine
     synth_init(&g_app.synth, 44100.0f);
@@ -1605,11 +2511,12 @@ int main(void) {
     drum_machine_init(&g_app.drums, 44100.0f);
     arp_init(&g_app.arp);
     g_app.arp_ui.enabled = g_app.arp.enabled;
-    g_app.arp_ui.rate = g_app.arp.rate;
+    g_app.arp_ui.rate_index = arp_multiplier_index_for_value(g_app.arp.rate);
     g_app.arp_ui.mode = g_app.arp.mode;
     
     // Initialize parameter queue
     param_queue_init();
+    midi_input_start();
     
     // Set defaults
     g_app.tempo = 120.0f;
@@ -1643,14 +2550,19 @@ int main(void) {
     printf("• Extended Effects Rack\n");
     printf("• Arpeggiator\n");
     printf("• No keyboard input - pure GUI workflow\n\n");
+
+    bool space_was_pressed = false;
+    bool esc_was_pressed = false;
     
     // Main loop
     while (!glfwWindowShouldClose(g_app.window)) {
         glfwPollEvents();
+        poll_export_job();
         
         // Poll keyboard directly (bypass Nuklear stealing input)
         for (size_t i = 0; i < KEYMAP_SIZE; i++) {
             int state = glfwGetKey(g_app.window, g_keymap[i].glfw_key);
+            uint8_t midi_note = (uint8_t)g_keymap[i].midi_note;
             
             // Key just pressed
             if (state == GLFW_PRESS && !g_app.keys_pressed[i]) {
@@ -1662,11 +2574,8 @@ int main(void) {
                                                  g_keymap[i].midi_note, 1.0f);
                 }
                 
-                if (g_app.arp_ui.enabled) {
-                    arp_note_on(&g_app.arp, g_keymap[i].midi_note);
-                } else {
-                    synth_note_on(&g_app.synth, g_keymap[i].midi_note, 1.0f);
-                }
+                keyboard_set_note_active(midi_note, true);
+                midi_queue_send_note_on(midi_note, 110);
                 
                 printf("🎹 %s ON\n", g_keymap[i].label);
             }
@@ -1680,11 +2589,8 @@ int main(void) {
                                                   g_keymap[i].midi_note);
                 }
                 
-                if (g_app.arp_ui.enabled) {
-                    arp_note_off(&g_app.arp, g_keymap[i].midi_note);
-                } else {
-                    synth_note_off(&g_app.synth, g_keymap[i].midi_note);
-                }
+                keyboard_set_note_active(midi_note, false);
+                midi_queue_send_note_off(midi_note);
                 
                 printf("🎹 %s OFF\n", g_keymap[i].label);
             }
@@ -1692,7 +2598,6 @@ int main(void) {
         
         // Space = toggle loop playback
         if (glfwGetKey(g_app.window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-            static bool space_was_pressed = false;
             if (!space_was_pressed) {
                 if (g_app.loop_recorder.playing) {
                     loop_recorder_stop_playback(&g_app.loop_recorder, &g_app.synth);
@@ -1702,14 +2607,17 @@ int main(void) {
                 space_was_pressed = true;
             }
         } else {
-            static bool space_was_pressed = false;
             space_was_pressed = false;
         }
         
         // ESC = panic
         if (glfwGetKey(g_app.window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-            synth_all_notes_off(&g_app.synth);
-            g_app.arp.num_held = 0;
+            if (!esc_was_pressed) {
+                param_queue_push(PARAM_PANIC, 0.0f);
+                esc_was_pressed = true;
+            }
+        } else {
+            esc_was_pressed = false;
         }
         
         nk_glfw3_new_frame(&g_app.glfw);
@@ -1726,9 +2634,15 @@ int main(void) {
     }
     
     // Cleanup
+    midi_input_stop();
     ma_device_uninit(&g_app.audio_device);
     nk_glfw3_shutdown(&g_app.glfw);
     glfwTerminate();
+    sample_buffer_free(&g_app.sampler.buffer);
+    if (g_app.export_state.buffer) {
+        free(g_app.export_state.buffer);
+        g_app.export_state.buffer = NULL;
+    }
     
     printf("\n👋 Goodbye!\n");
     return 0;

@@ -41,6 +41,7 @@ typedef enum {
     PARAM_ENV_DECAY,
     PARAM_ENV_SUSTAIN,
     PARAM_ENV_RELEASE,
+    PARAM_PANIC,
 } ParamType;
 
 // Structure for a parameter change

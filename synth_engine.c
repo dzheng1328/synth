@@ -54,7 +54,7 @@ float lerp(float a, float b, float t) {
 
 // Fast random float between 0.0 and 1.0
 static uint32_t rng_state = 123456789;
-float fast_rand() {
+float fast_rand(void) {
     rng_state = rng_state * 1664525 + 1013904223;
     return (float)(rng_state >> 8) / 16777216.0f;
 }
@@ -64,6 +64,7 @@ float fast_rand() {
 // ============================================================================
 
 void osc_init(Oscillator* osc, float sample_rate) {
+    (void)sample_rate;
     memset(osc, 0, sizeof(Oscillator));
     osc->waveform = WAVE_SAW;
     osc->phase = 0.0f;
@@ -163,11 +164,11 @@ float osc_process(Oscillator* osc, float sample_rate, float fm_input) {
             }
             
             float voice_freq = base_freq * cents_to_ratio(detune_offset);
-            float phase_increment = voice_freq / sample_rate;
+            float detune_ratio = voice_freq / fmaxf(base_freq, 0.0001f);
             
             // Calculate phase for this unison voice
-            float voice_phase = osc->phase + (i * osc->phase_offset);
-            if (voice_phase >= 1.0f) voice_phase -= 1.0f;
+            float voice_phase = osc->phase * detune_ratio + (i * osc->phase_offset);
+            voice_phase -= floorf(voice_phase);
             
             // Generate sample
             float pw = osc->pulse_width;
@@ -220,28 +221,25 @@ void filter_init(Filter* filter, float sample_rate) {
     filter->resonance = 0.0f;
     filter->keytrack = 0.0f;
     filter->env_amount = 0.0f;
+    filter->cutoff_actual = filter->cutoff;
+    filter->resonance_actual = filter->resonance;
+    filter_update_coefficients(filter, sample_rate, filter->cutoff, filter->resonance);
 }
 
 void filter_set_mode(Filter* filter, FilterMode mode) {
     filter->mode = mode;
 }
 
-void filter_update_coefficients(Filter* filter, float sample_rate) {
-    // State variable filter coefficients
-    float freq = clamp(filter->cutoff, 20.0f, sample_rate * 0.45f);
+void filter_update_coefficients(Filter* filter, float sample_rate, float cutoff, float resonance) {
+    filter->cutoff_actual = clamp(cutoff, 20.0f, sample_rate * 0.45f);
+    filter->resonance_actual = clamp(resonance, 0.0f, 0.99f);
+
+    float freq = filter->cutoff_actual;
     filter->f = 2.0f * sinf(M_PI * freq / sample_rate);
-    
-    // Resonance to Q (0.5 to 10.0)
-    filter->q = clamp(1.0f - filter->resonance, 0.1f, 1.0f);
+    filter->q = clamp(1.0f - filter->resonance_actual, 0.1f, 1.0f);
 }
 
-float filter_process(Filter* filter, float input, float cutoff, float resonance) {
-    // Update cutoff and resonance if they changed
-    if (cutoff != filter->cutoff || resonance != filter->resonance) {
-        filter->cutoff = cutoff;
-        filter->resonance = resonance;
-    }
-    
+float filter_process(Filter* filter, float input) {
     // State variable filter (Chamberlin/Hal Chamberlin)
     filter->low += filter->f * filter->band;
     filter->high = input - filter->low - (filter->q * filter->band);
@@ -476,8 +474,38 @@ void mod_matrix_add_slot(ModulationMatrix* matrix, ModSource source,
 }
 
 void mod_matrix_update_sources(ModulationMatrix* matrix, SynthEngine* synth) {
-    // This will be called once per audio buffer to update all source values
-    // For now, we'll implement this in the main process function
+    if (!matrix || !synth) {
+        return;
+    }
+
+    for (int i = 0; i < MOD_SOURCE_COUNT; i++) {
+        matrix->source_values[i] = 0.0f;
+    }
+
+    for (int i = 0; i < MAX_LFO && (MOD_SOURCE_LFO1 + i) < MOD_SOURCE_COUNT; i++) {
+        matrix->source_values[MOD_SOURCE_LFO1 + i] =
+            lfo_process(&synth->lfos[i], synth->sample_rate, synth->tempo);
+    }
+
+    float velocity_sum = 0.0f;
+    float keytrack_sum = 0.0f;
+    int active = 0;
+    for (int i = 0; i < MAX_VOICES; i++) {
+        Voice* voice = &synth->voices[i];
+        if (voice_is_active(voice)) {
+            velocity_sum += voice->velocity;
+            float normalized_note = (float)(voice->midi_note - 60) / 36.0f;
+            keytrack_sum += normalized_note;
+            active++;
+        }
+    }
+
+    if (active > 0) {
+        matrix->source_values[MOD_SOURCE_VELOCITY] = clamp(velocity_sum / active, 0.0f, 1.0f);
+        matrix->source_values[MOD_SOURCE_KEYTRACK] = clamp(keytrack_sum / active, -1.0f, 1.0f);
+    }
+
+    matrix->source_values[MOD_SOURCE_RANDOM] = (fast_rand() * 2.0f) - 1.0f;
 }
 
 float mod_matrix_get_value(ModulationMatrix* matrix, ModDestination dest) {
@@ -605,9 +633,13 @@ void voice_process(Voice* voice, float* left, float* right, float sample_rate) {
     float filter_cutoff = voice->filter.cutoff;
     filter_cutoff *= 1.0f + (env_filter * voice->filter.env_amount * 10.0f); // Up to 10x modulation
     filter_cutoff = clamp(filter_cutoff, 20.0f, sample_rate * 0.45f);
-    
-    filter_update_coefficients(&voice->filter, sample_rate);
-    float filtered = filter_process(&voice->filter, mixed, filter_cutoff, voice->filter.resonance);
+    float filter_resonance = clamp(voice->filter.resonance, 0.0f, 0.99f);
+
+    if (fabsf(filter_cutoff - voice->filter.cutoff_actual) > 1.0f ||
+        fabsf(filter_resonance - voice->filter.resonance_actual) > 0.001f) {
+        filter_update_coefficients(&voice->filter, sample_rate, filter_cutoff, filter_resonance);
+    }
+    float filtered = filter_process(&voice->filter, mixed);
     
     // Apply amplitude envelope
     float output = filtered * env_amp * voice->velocity;
@@ -750,11 +782,7 @@ void synth_process(SynthEngine* synth, float* output, int num_frames) {
         float left = 0.0f;
         float right = 0.0f;
         
-        // Update LFOs (once per sample)
-        for (int i = 0; i < MAX_LFO; i++) {
-            synth->mod_matrix.source_values[MOD_SOURCE_LFO1 + i] = 
-                lfo_process(&synth->lfos[i], synth->sample_rate, synth->tempo);
-        }
+        mod_matrix_update_sources(&synth->mod_matrix, synth);
         
         // Process each voice
         int active_voices = 0;

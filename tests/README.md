@@ -32,3 +32,16 @@ gcc tests/audio_checklist_test.c synth_engine.c -o audio_checklist_test -lm
 ```
 
 The binary prints a checklist-style report and returns a non-zero exit code if any item fails its thresholds.
+
+## `sample_io_test.c`
+
+Validates the WAV loader/exporter used by the GUI sampler and offline bounce system. The harness writes a synthetic stereo buffer to disk, reloads it to verify metadata/content fidelity, and exercises the primary error paths (missing files and invalid arguments).
+
+### Build & Run
+
+```sh
+cd /Users/dzheng/Documents/synth
+gcc tests/sample_io_test.c sample_io.c -I. -lm && ./sample_io_test
+```
+
+Temporary WAVs land under `/tmp`, and the run completes in well under a second. A non-zero exit code means at least one guard/round-trip check failed.
