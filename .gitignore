@@ -1,5 +1,12 @@
 # Compiled binaries
 synth
+synth_pro
+synth_complete
+synth_pro_app
+synth_complete_app
+synth_pro_debug
+synth_complete_debug
+param_queue_test_bin
 sample_io_test
 *.o
 *.out
