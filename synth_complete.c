@@ -23,6 +23,8 @@
 #include "miniaudio.h"
 
 #include "synth_engine.h"
+#include "param_queue.h"
+#include "midi_input.h"
 #include <GLFW/glfw3.h>
 
 #ifdef __APPLE__
@@ -362,12 +364,72 @@ AppState g_app = {0};
 // AUDIO CALLBACK
 // ============================================================================
 
+static void apply_param_change(const ParamMsg* change, void* userdata) {
+    (void)userdata;
+    if (!change) {
+        return;
+    }
+    synth_engine_apply_param(&g_app.synth, change);
+}
+
+static void dispatch_note_on(uint8_t note, float velocity) {
+    if (g_app.arp_enabled) {
+        arp_note_on(&g_app.arp, note);
+    } else {
+        synth_note_on(&g_app.synth, note, velocity > 0.0f ? velocity : 1.0f);
+    }
+}
+
+static void dispatch_note_off(uint8_t note) {
+    if (g_app.arp_enabled) {
+        arp_note_off(&g_app.arp, note);
+    } else {
+        synth_note_off(&g_app.synth, note);
+    }
+}
+
+static void handle_midi_event(const MidiEvent* event, void* userdata) {
+    (void)userdata;
+    if (!event) {
+        return;
+    }
+
+    switch (event->type) {
+        case MIDI_EVENT_NOTE_ON: {
+            float velocity = (float)event->data2 / 127.0f;
+            if (velocity <= 0.0f) {
+                dispatch_note_off(event->data1);
+            } else {
+                dispatch_note_on(event->data1, velocity);
+            }
+            break;
+        }
+        case MIDI_EVENT_NOTE_OFF:
+            dispatch_note_off(event->data1);
+            break;
+        case MIDI_EVENT_PITCH_BEND: {
+            uint16_t value = ((uint16_t)event->data2 << 7) | event->data1;
+            float amount = ((float)value - 8192.0f) / 8192.0f;
+            synth_pitch_bend(&g_app.synth, amount);
+            break;
+        }
+        case MIDI_EVENT_CONTROL_CHANGE:
+        case MIDI_EVENT_AFTERTOUCH:
+        case MIDI_EVENT_PROGRAM_CHANGE:
+        default:
+            break;
+    }
+}
+
 void audio_callback(ma_device* device, void* output, const void* input, ma_uint32 frameCount) {
     float* out = (float*)output;
     (void)input;
     
     // Update time
     double sample_duration = 1.0 / g_app.synth.sample_rate;
+
+    param_queue_drain(apply_param_change, NULL);
+    midi_queue_drain(handle_midi_event, NULL);
     
     for (ma_uint32 i = 0; i < frameCount; i++) {
         // Process arpeggiator
@@ -400,22 +462,20 @@ void audio_callback(ma_device* device, void* output, const void* input, ma_uint3
 
 // Helper to play/stop notes
 void play_note(int midi_note, const char* label) {
-    if (g_app.arp_enabled) {
-        arp_note_on(&g_app.arp, midi_note);
-    } else {
-        synth_note_on(&g_app.synth, midi_note, 1.0f);  // Max velocity for testing
+    if (midi_note < 0 || midi_note > 127) {
+        return;
     }
-    printf("🎵 PLAY: %s (MIDI %d) - Active voices: %d\n", label, midi_note, g_app.synth.num_active_voices);
+    midi_queue_send_note_on((uint8_t)midi_note, 110);
+    printf("🎵 QUEUE NOTE ON: %s (MIDI %d)\n", label, midi_note);
     fflush(stdout);
 }
 
 void stop_note(int midi_note, const char* label) {
-    if (g_app.arp_enabled) {
-        arp_note_off(&g_app.arp, midi_note);
-    } else {
-        synth_note_off(&g_app.synth, midi_note);
+    if (midi_note < 0 || midi_note > 127) {
+        return;
     }
-    printf("🔇 STOP: %s (MIDI %d) - Active voices: %d\n", label, midi_note, g_app.synth.num_active_voices);
+    midi_queue_send_note_off((uint8_t)midi_note);
+    printf("🔇 QUEUE NOTE OFF: %s (MIDI %d)\n", label, midi_note);
     fflush(stdout);
 }
 
@@ -932,6 +992,11 @@ int main(void) {
     nk_glfw3_font_stash_begin(&g_app.glfw, &atlas);
     nk_glfw3_font_stash_end(&g_app.glfw);
     
+    // Init queues and MIDI input
+    param_queue_init();
+    midi_input_start();
+    midi_input_list_ports();
+
     // Init synth
     synth_init(&g_app.synth, 44100.0f);
     g_app.tempo = 120.0f;
@@ -1043,6 +1108,7 @@ int main(void) {
     }
     
     // Cleanup
+    midi_input_stop();
     ma_device_uninit(&g_app.audio_device);
     nk_glfw3_shutdown(&g_app.glfw);
     glfwTerminate();

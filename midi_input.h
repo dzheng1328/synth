@@ -23,6 +23,9 @@ void midi_queue_drain(midi_event_handler handler, void* userdata);
 // Push a MIDI event into the queue from any producer thread (UI, MIDI driver, etc.).
 void midi_queue_push_event(const MidiEvent* event);
 
+// Print the available hardware MIDI ports (implementation-defined formatting).
+void midi_input_list_ports(void);
+
 // Convenience helpers for generating events locally (e.g., QWERTY keyboard)
 void midi_queue_send_note_on(uint8_t note, uint8_t velocity);
 void midi_queue_send_note_off(uint8_t note);

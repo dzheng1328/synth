@@ -205,10 +205,13 @@ case "$TARGET" in
             synth_engine.c \
             param_queue.c \
             pa_ringbuffer.c \
-            nuklear_impl.c
+            nuklear_impl.c \
+            midi_input.c \
+            midi_shim.c \
             preset.c \
             project.c \
-            third_party/cjson/cJSON.c \
+            third_party/cjson/cJSON.c
+        ;;
     *)
         echo "Unhandled target: $TARGET" >&2
         exit 1
