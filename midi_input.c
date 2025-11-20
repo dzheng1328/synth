@@ -1,34 +1,17 @@
 #include "midi_input.h"
-#include "pa_ringbuffer.h"
+#include "param_queue.h"
 
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
-#define MIDI_QUEUE_SIZE 512
-
-static PaUtilRingBuffer g_midi_queue;
-static MidiEvent g_midi_buffer[MIDI_QUEUE_SIZE];
-static bool g_queue_ready = false;
 static bool g_midi_running = false;
 
-static void midi_queue_init(void) {
-    if (g_queue_ready) {
-        return;
-    }
-    PaUtil_InitializeRingBuffer(&g_midi_queue,
-                                sizeof(MidiEvent),
-                                MIDI_QUEUE_SIZE,
-                                g_midi_buffer);
-    g_queue_ready = true;
-}
-
 void midi_queue_push_event(const MidiEvent* event) {
-    if (!g_queue_ready || !event) {
+    if (!event) {
         return;
     }
-    ring_buffer_size_t written = PaUtil_WriteRingBuffer(&g_midi_queue, event, 1);
-    if (written == 0) {
+    if (!midi_queue_enqueue(event)) {
         static int warned = 0;
         if (!warned) {
             fprintf(stderr, "⚠️ MIDI queue overflow — dropping events.\n");
@@ -37,19 +20,12 @@ void midi_queue_push_event(const MidiEvent* event) {
     }
 }
 
-static int midi_queue_pop(MidiEvent* out_event) {
-    if (!g_queue_ready || !out_event) {
-        return 0;
-    }
-    return (int)PaUtil_ReadRingBuffer(&g_midi_queue, out_event, 1);
-}
-
 void midi_queue_drain(midi_event_handler handler, void* userdata) {
     if (!handler) {
         return;
     }
     MidiEvent event;
-    while (midi_queue_pop(&event) == 1) {
+    while (midi_queue_dequeue(&event)) {
         handler(&event, userdata);
     }
 }
@@ -206,8 +182,6 @@ void midi_input_start(void) {
         return;
     }
 
-    midi_queue_init();
-
     if (MIDIClientCreate(CFSTR("SynthPro MIDI"), NULL, NULL, &g_midi_client) != noErr) {
         fprintf(stderr, "⚠️ Unable to create MIDI client.\n");
         return;
@@ -252,7 +226,6 @@ void midi_input_stop(void) {
 #else // !__APPLE__
 
 void midi_input_start(void) {
-    midi_queue_init();
     if (!g_midi_running) {
         printf("⚠️ MIDI input not implemented on this platform build.\n");
         g_midi_running = true;

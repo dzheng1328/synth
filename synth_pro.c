@@ -20,6 +20,8 @@
 #include "param_queue.h"
 #include "midi_input.h"
 #include "sample_io.h"
+#include "preset.h"
+#include "project.h"
 
 #include "nuklear_config.h"
 #include "nuklear.h"
@@ -43,8 +45,63 @@ static inline float clampf(float value, float min_value, float max_value) {
     return value;
 }
 
+static void enqueue_param_float(ParamId id, float value) {
+    ParamMsg msg = {.id = (uint32_t)id, .type = PARAM_FLOAT};
+    msg.value.f = value;
+    if (!param_queue_enqueue(&msg)) {
+        fprintf(stderr, "[PARAM] drop float id=%u\n", msg.id);
+    }
+}
+
+static void enqueue_param_bool(ParamId id, bool value) {
+    ParamMsg msg = {.id = (uint32_t)id, .type = PARAM_BOOL};
+    msg.value.b = value ? 1 : 0;
+    if (!param_queue_enqueue(&msg)) {
+        fprintf(stderr, "[PARAM] drop bool id=%u\n", msg.id);
+    }
+}
+
+static void enqueue_param_int(ParamId id, int value) {
+    ParamMsg msg = {.id = (uint32_t)id, .type = PARAM_INT};
+    msg.value.i = value;
+    if (!param_queue_enqueue(&msg)) {
+        fprintf(stderr, "[PARAM] drop int id=%u\n", msg.id);
+    }
+}
+
+static float param_msg_as_float(const ParamMsg* msg) {
+    if (!msg) return 0.0f;
+    switch (msg->type) {
+        case PARAM_FLOAT: return msg->value.f;
+        case PARAM_INT:   return (float)msg->value.i;
+        case PARAM_BOOL:  return msg->value.b ? 1.0f : 0.0f;
+        default:          return 0.0f;
+    }
+}
+
+static int param_msg_as_int(const ParamMsg* msg) {
+    if (!msg) return 0;
+    switch (msg->type) {
+        case PARAM_INT:   return msg->value.i;
+        case PARAM_FLOAT: return (int)lroundf(msg->value.f);
+        case PARAM_BOOL:  return msg->value.b != 0;
+        default:          return 0;
+    }
+}
+
+static bool param_msg_as_bool(const ParamMsg* msg) {
+    if (!msg) return false;
+    switch (msg->type) {
+        case PARAM_BOOL:  return msg->value.b != 0;
+        case PARAM_INT:   return msg->value.i != 0;
+        case PARAM_FLOAT: return fabsf(msg->value.f) > 0.5f;
+        default:          return false;
+    }
+}
+
 static void dispatch_note_on(uint8_t note, float velocity);
 static void dispatch_note_off(uint8_t note);
+static void apply_param_change(const ParamMsg* change, void* userdata);
 
 static bool is_black_key(int midi_note) {
     int mod = midi_note % 12;
@@ -942,12 +999,327 @@ typedef struct {
 
     char sample_path_input[512];
     char export_path_input[512];
+    char preset_path_input[512];
+    char project_path_input[512];
     float export_duration_seconds;
     char sample_status[256];
     char export_status[256];
+    char preset_status[256];
+    char project_status[256];
+
+    PresetData current_preset;
+    ProjectData current_project;
+    bool preset_dirty;
+    bool project_dirty;
+    int dirty_suppression_count;
 } AppState;
 
 AppState g_app = {0};
+
+static inline void begin_dirty_suppression(void) {
+    g_app.dirty_suppression_count++;
+}
+
+static inline void end_dirty_suppression(void) {
+    if (g_app.dirty_suppression_count > 0) {
+        g_app.dirty_suppression_count--;
+    }
+}
+
+static inline bool dirty_updates_blocked(void) {
+    return g_app.dirty_suppression_count > 0;
+}
+
+static inline void mark_project_dirty(void) {
+    if (!dirty_updates_blocked()) {
+        g_app.project_dirty = true;
+    }
+}
+
+static inline void mark_preset_dirty(void) {
+    if (!dirty_updates_blocked()) {
+        g_app.preset_dirty = true;
+        g_app.project_dirty = true;
+    }
+}
+
+static void enqueue_param_float_user(ParamId id, float value) {
+    enqueue_param_float(id, value);
+    mark_preset_dirty();
+}
+
+static void enqueue_param_bool_user(ParamId id, bool value) {
+    enqueue_param_bool(id, value);
+    mark_preset_dirty();
+}
+
+static void enqueue_param_int_user(ParamId id, int value) {
+    enqueue_param_int(id, value);
+    mark_preset_dirty();
+}
+
+static void capture_preset_from_app(PresetData* preset) {
+    if (!preset) {
+        return;
+    }
+
+    preset->version = PRESET_SCHEMA_VERSION;
+    preset->tempo = g_app.tempo_ui;
+    preset->master_volume = g_app.master_volume_ui;
+    preset->filter_cutoff = g_app.filter_cutoff;
+    preset->filter_resonance = g_app.filter_resonance;
+    preset->filter_mode = (int)g_app.filter_mode;
+    preset->filter_env_amount = g_app.filter_env;
+    preset->env_attack = g_app.env_attack;
+    preset->env_decay = g_app.env_decay;
+    preset->env_sustain = g_app.env_sustain;
+    preset->env_release = g_app.env_release;
+
+    preset->distortion.enabled = g_app.fx_ui.distortion.enabled ? true : false;
+    preset->distortion.drive = g_app.fx_ui.distortion.drive;
+    preset->distortion.mix = g_app.fx_ui.distortion.mix;
+
+    preset->chorus.enabled = g_app.fx_ui.chorus.enabled ? true : false;
+    preset->chorus.rate = g_app.fx_ui.chorus.rate;
+    preset->chorus.depth = g_app.fx_ui.chorus.depth;
+    preset->chorus.mix = g_app.fx_ui.chorus.mix;
+
+    preset->delay.enabled = g_app.fx_ui.delay.enabled ? true : false;
+    preset->delay.time = g_app.fx_ui.delay.time;
+    preset->delay.feedback = g_app.fx_ui.delay.feedback;
+    preset->delay.mix = g_app.fx_ui.delay.mix;
+
+    preset->reverb.enabled = g_app.fx_ui.reverb.enabled ? true : false;
+    preset->reverb.size = g_app.fx_ui.reverb.size;
+    preset->reverb.damping = g_app.fx_ui.reverb.damping;
+    preset->reverb.mix = g_app.fx_ui.reverb.mix;
+
+    preset->compressor.enabled = g_app.fx_ui.compressor.enabled ? true : false;
+    preset->compressor.threshold = g_app.fx_ui.compressor.threshold;
+    preset->compressor.ratio = g_app.fx_ui.compressor.ratio;
+
+    preset->arp.enabled = g_app.arp_ui.enabled ? true : false;
+    preset->arp.rate_multiplier = arp_multiplier_value(g_app.arp_ui.rate_index);
+    preset->arp.mode = g_app.arp_ui.mode;
+}
+
+static void apply_preset_to_app(const PresetData* preset) {
+    if (!preset) {
+        return;
+    }
+
+    begin_dirty_suppression();
+    g_app.current_preset = *preset;
+
+    g_app.master_volume_ui = preset->master_volume;
+    enqueue_param_float(PARAM_MASTER_VOLUME, preset->master_volume);
+
+    g_app.filter_cutoff = preset->filter_cutoff;
+    enqueue_param_float(PARAM_FILTER_CUTOFF, preset->filter_cutoff);
+
+    g_app.filter_resonance = preset->filter_resonance;
+    enqueue_param_float(PARAM_FILTER_RESONANCE, preset->filter_resonance);
+
+    g_app.filter_mode = (FilterMode)preset->filter_mode;
+    enqueue_param_int(PARAM_FILTER_MODE, preset->filter_mode);
+
+    g_app.filter_env = preset->filter_env_amount;
+    enqueue_param_float(PARAM_FILTER_ENV_AMOUNT, preset->filter_env_amount);
+
+    g_app.env_attack = preset->env_attack;
+    enqueue_param_float(PARAM_ENV_ATTACK, preset->env_attack);
+
+    g_app.env_decay = preset->env_decay;
+    enqueue_param_float(PARAM_ENV_DECAY, preset->env_decay);
+
+    g_app.env_sustain = preset->env_sustain;
+    enqueue_param_float(PARAM_ENV_SUSTAIN, preset->env_sustain);
+
+    g_app.env_release = preset->env_release;
+    enqueue_param_float(PARAM_ENV_RELEASE, preset->env_release);
+
+    g_app.fx_ui.distortion.enabled = preset->distortion.enabled ? nk_true : nk_false;
+    g_app.fx_ui.distortion.drive = preset->distortion.drive;
+    g_app.fx_ui.distortion.mix = preset->distortion.mix;
+    enqueue_param_bool(PARAM_FX_DISTORTION_ENABLED, preset->distortion.enabled);
+    enqueue_param_float(PARAM_FX_DISTORTION_DRIVE, preset->distortion.drive);
+    enqueue_param_float(PARAM_FX_DISTORTION_MIX, preset->distortion.mix);
+
+    g_app.fx_ui.chorus.enabled = preset->chorus.enabled ? nk_true : nk_false;
+    g_app.fx_ui.chorus.rate = preset->chorus.rate;
+    g_app.fx_ui.chorus.depth = preset->chorus.depth;
+    g_app.fx_ui.chorus.mix = preset->chorus.mix;
+    enqueue_param_bool(PARAM_FX_CHORUS_ENABLED, preset->chorus.enabled);
+    enqueue_param_float(PARAM_FX_CHORUS_RATE, preset->chorus.rate);
+    enqueue_param_float(PARAM_FX_CHORUS_DEPTH, preset->chorus.depth);
+    enqueue_param_float(PARAM_FX_CHORUS_MIX, preset->chorus.mix);
+
+    g_app.fx_ui.delay.enabled = preset->delay.enabled ? nk_true : nk_false;
+    g_app.fx_ui.delay.time = preset->delay.time;
+    g_app.fx_ui.delay.feedback = preset->delay.feedback;
+    g_app.fx_ui.delay.mix = preset->delay.mix;
+    enqueue_param_bool(PARAM_FX_DELAY_ENABLED, preset->delay.enabled);
+    enqueue_param_float(PARAM_FX_DELAY_TIME, preset->delay.time);
+    enqueue_param_float(PARAM_FX_DELAY_FEEDBACK, preset->delay.feedback);
+    enqueue_param_float(PARAM_FX_DELAY_MIX, preset->delay.mix);
+
+    g_app.fx_ui.reverb.enabled = preset->reverb.enabled ? nk_true : nk_false;
+    g_app.fx_ui.reverb.size = preset->reverb.size;
+    g_app.fx_ui.reverb.damping = preset->reverb.damping;
+    g_app.fx_ui.reverb.mix = preset->reverb.mix;
+    enqueue_param_bool(PARAM_FX_REVERB_ENABLED, preset->reverb.enabled);
+    enqueue_param_float(PARAM_FX_REVERB_SIZE, preset->reverb.size);
+    enqueue_param_float(PARAM_FX_REVERB_DAMPING, preset->reverb.damping);
+    enqueue_param_float(PARAM_FX_REVERB_MIX, preset->reverb.mix);
+
+    g_app.fx_ui.compressor.enabled = preset->compressor.enabled ? nk_true : nk_false;
+    g_app.fx_ui.compressor.threshold = preset->compressor.threshold;
+    g_app.fx_ui.compressor.ratio = preset->compressor.ratio;
+    enqueue_param_bool(PARAM_FX_COMP_ENABLED, preset->compressor.enabled);
+    enqueue_param_float(PARAM_FX_COMP_THRESHOLD, preset->compressor.threshold);
+    enqueue_param_float(PARAM_FX_COMP_RATIO, preset->compressor.ratio);
+
+    g_app.arp_ui.enabled = preset->arp.enabled ? nk_true : nk_false;
+    g_app.arp_ui.rate_index = arp_multiplier_index_for_value(preset->arp.rate_multiplier);
+    g_app.arp.rate = arp_multiplier_value(g_app.arp_ui.rate_index);
+    g_app.arp_ui.mode = preset->arp.mode;
+    enqueue_param_bool(PARAM_ARP_ENABLED, preset->arp.enabled);
+    enqueue_param_float(PARAM_ARP_RATE, preset->arp.rate_multiplier);
+    enqueue_param_int(PARAM_ARP_MODE, preset->arp.mode);
+
+    g_app.tempo_ui = preset->tempo;
+    enqueue_param_float(PARAM_TEMPO, preset->tempo);
+
+    end_dirty_suppression();
+    g_app.preset_dirty = false;
+
+    const char* preset_name = preset->meta.name[0] ? preset->meta.name : "(unnamed)";
+    snprintf(g_app.preset_status, sizeof(g_app.preset_status), "✅ Applied preset %s", preset_name);
+}
+
+static void capture_project_from_app(ProjectData* project) {
+    if (!project) {
+        return;
+    }
+
+    project->tempo = g_app.tempo_ui;
+    project->export_duration_seconds = g_app.export_duration_seconds;
+    strncpy(project->preset_path, g_app.preset_path_input, sizeof(project->preset_path) - 1);
+    project->preset_path[sizeof(project->preset_path) - 1] = '\0';
+    strncpy(project->sample_path, g_app.sample_path_input, sizeof(project->sample_path) - 1);
+    project->sample_path[sizeof(project->sample_path) - 1] = '\0';
+    strncpy(project->export_path, g_app.export_path_input, sizeof(project->export_path) - 1);
+    project->export_path[sizeof(project->export_path) - 1] = '\0';
+
+    capture_preset_from_app(&project->preset);
+}
+
+static void apply_project_to_app(const ProjectData* project) {
+    if (!project) {
+        return;
+    }
+
+    begin_dirty_suppression();
+    g_app.current_project = *project;
+    g_app.current_preset = project->preset;
+
+    strncpy(g_app.preset_path_input, project->preset_path, sizeof(g_app.preset_path_input) - 1);
+    g_app.preset_path_input[sizeof(g_app.preset_path_input) - 1] = '\0';
+    strncpy(g_app.sample_path_input, project->sample_path, sizeof(g_app.sample_path_input) - 1);
+    g_app.sample_path_input[sizeof(g_app.sample_path_input) - 1] = '\0';
+    strncpy(g_app.export_path_input, project->export_path, sizeof(g_app.export_path_input) - 1);
+    g_app.export_path_input[sizeof(g_app.export_path_input) - 1] = '\0';
+
+    g_app.export_duration_seconds = project->export_duration_seconds;
+    g_app.tempo_ui = project->tempo;
+    enqueue_param_float(PARAM_TEMPO, project->tempo);
+
+    if (project->sample_path[0] != '\0') {
+        load_sample_file(project->sample_path);
+    }
+
+    apply_preset_to_app(&project->preset);
+
+    end_dirty_suppression();
+    g_app.project_dirty = false;
+    g_app.preset_dirty = false;
+
+    const char* project_name = project->meta.name[0] ? project->meta.name : "(untitled project)";
+    snprintf(g_app.project_status, sizeof(g_app.project_status), "✅ Applied project %s", project_name);
+}
+
+static void save_current_preset(const char* path, bool pretty) {
+    if (!path || path[0] == '\0') {
+        snprintf(g_app.preset_status, sizeof(g_app.preset_status), "❌ Provide a preset path");
+        return;
+    }
+
+    capture_preset_from_app(&g_app.current_preset);
+    if (!preset_save_file(&g_app.current_preset, path, pretty)) {
+        snprintf(g_app.preset_status, sizeof(g_app.preset_status), "❌ Failed to save %s", path);
+        return;
+    }
+
+    strncpy(g_app.preset_path_input, path, sizeof(g_app.preset_path_input) - 1);
+    g_app.preset_path_input[sizeof(g_app.preset_path_input) - 1] = '\0';
+    g_app.preset_dirty = false;
+    snprintf(g_app.preset_status, sizeof(g_app.preset_status), "💾 Preset saved to %s", path);
+}
+
+static void load_preset_from_path(const char* path) {
+    if (!path || path[0] == '\0') {
+        snprintf(g_app.preset_status, sizeof(g_app.preset_status), "❌ Provide a preset path");
+        return;
+    }
+
+    PresetData loaded;
+    if (!preset_load_file(&loaded, path)) {
+        snprintf(g_app.preset_status, sizeof(g_app.preset_status), "❌ Failed to load %s", path);
+        return;
+    }
+
+    apply_preset_to_app(&loaded);
+    strncpy(g_app.preset_path_input, path, sizeof(g_app.preset_path_input) - 1);
+    g_app.preset_path_input[sizeof(g_app.preset_path_input) - 1] = '\0';
+    g_app.current_project.preset = g_app.current_preset;
+    mark_project_dirty();
+}
+
+static void save_current_project(const char* path, bool pretty) {
+    if (!path || path[0] == '\0') {
+        snprintf(g_app.project_status, sizeof(g_app.project_status), "❌ Provide a project path");
+        return;
+    }
+
+    capture_project_from_app(&g_app.current_project);
+    if (!project_save_file(&g_app.current_project, path, pretty)) {
+        snprintf(g_app.project_status, sizeof(g_app.project_status), "❌ Failed to save %s", path);
+        return;
+    }
+
+    strncpy(g_app.project_path_input, path, sizeof(g_app.project_path_input) - 1);
+    g_app.project_path_input[sizeof(g_app.project_path_input) - 1] = '\0';
+    g_app.project_dirty = false;
+    snprintf(g_app.project_status, sizeof(g_app.project_status), "💾 Project saved to %s", path);
+}
+
+static void load_project_from_path(const char* path) {
+    if (!path || path[0] == '\0') {
+        snprintf(g_app.project_status, sizeof(g_app.project_status), "❌ Provide a project path");
+        return;
+    }
+
+    ProjectData loaded;
+    if (!project_load_file(&loaded, path)) {
+        snprintf(g_app.project_status, sizeof(g_app.project_status), "❌ Failed to load %s", path);
+        return;
+    }
+
+    apply_project_to_app(&loaded);
+    strncpy(g_app.project_path_input, path, sizeof(g_app.project_path_input) - 1);
+    g_app.project_path_input[sizeof(g_app.project_path_input) - 1] = '\0';
+    snprintf(g_app.project_status, sizeof(g_app.project_status), "✅ Loaded project %s", path);
+}
 
 static inline void sample_slot_frame(const SampleBuffer* buffer, uint32_t index,
                                      float* out_left, float* out_right) {
@@ -1310,6 +1682,20 @@ static void draw_drums_panel(struct nk_context* ctx);
 static void draw_sample_loader_panel(struct nk_context* ctx);
 static void draw_export_panel(struct nk_context* ctx);
 static void draw_performance_panel(struct nk_context* ctx);
+static void draw_preset_panel(struct nk_context* ctx);
+static void draw_project_panel(struct nk_context* ctx);
+
+static void capture_preset_from_app(PresetData* preset);
+static void apply_preset_to_app(const PresetData* preset);
+static void capture_project_from_app(ProjectData* project);
+static void apply_project_to_app(const ProjectData* project);
+static void save_current_preset(const char* path, bool pretty);
+static void load_preset_from_path(const char* path);
+static void save_current_project(const char* path, bool pretty);
+static void load_project_from_path(const char* path);
+static bool load_sample_file(const char* path);
+static bool start_export_job(float seconds, const char* path);
+static void poll_export_job(void);
 
 static void draw_keyboard_panel(struct nk_context* ctx) {
     KeyboardUIState* kb = &g_app.keyboard_ui;
@@ -1508,7 +1894,7 @@ static void draw_distortion_card(struct nk_context* ctx) {
         nk_bool prev_enabled = g_app.fx_ui.distortion.enabled;
         nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.distortion.enabled);
         if (prev_enabled != g_app.fx_ui.distortion.enabled) {
-            param_queue_push(PARAM_FX_DISTORTION_ENABLED, g_app.fx_ui.distortion.enabled ? 1.0f : 0.0f);
+            enqueue_param_bool_user(PARAM_FX_DISTORTION_ENABLED, g_app.fx_ui.distortion.enabled);
         }
         if (g_app.fx_ui.distortion.enabled) {
             nk_layout_row_dynamic(ctx, 120, 2);
@@ -1516,11 +1902,11 @@ static void draw_distortion_card(struct nk_context* ctx) {
             float prev_mix = g_app.fx_ui.distortion.mix;
             if (draw_knob(ctx, "Drive", &g_app.fx_ui.distortion.drive, 1.0f, 20.0f, 0.1f) &&
                 fabsf(g_app.fx_ui.distortion.drive - prev_drive) > 0.0001f) {
-                param_queue_push(PARAM_FX_DISTORTION_DRIVE, g_app.fx_ui.distortion.drive);
+                enqueue_param_float_user(PARAM_FX_DISTORTION_DRIVE, g_app.fx_ui.distortion.drive);
             }
             if (draw_knob(ctx, "Mix", &g_app.fx_ui.distortion.mix, 0.0f, 1.0f, 0.01f) &&
                 fabsf(g_app.fx_ui.distortion.mix - prev_mix) > 0.0001f) {
-                param_queue_push(PARAM_FX_DISTORTION_MIX, g_app.fx_ui.distortion.mix);
+                enqueue_param_float_user(PARAM_FX_DISTORTION_MIX, g_app.fx_ui.distortion.mix);
             }
         }
         nk_group_end(ctx);
@@ -1533,7 +1919,7 @@ static void draw_chorus_card(struct nk_context* ctx) {
         nk_bool prev_enabled = g_app.fx_ui.chorus.enabled;
         nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.chorus.enabled);
         if (prev_enabled != g_app.fx_ui.chorus.enabled) {
-            param_queue_push(PARAM_FX_CHORUS_ENABLED, g_app.fx_ui.chorus.enabled ? 1.0f : 0.0f);
+            enqueue_param_bool_user(PARAM_FX_CHORUS_ENABLED, g_app.fx_ui.chorus.enabled);
         }
         if (g_app.fx_ui.chorus.enabled) {
             nk_layout_row_dynamic(ctx, 25, 1);
@@ -1541,19 +1927,19 @@ static void draw_chorus_card(struct nk_context* ctx) {
             float prev_rate = g_app.fx_ui.chorus.rate;
             nk_slider_float(ctx, 0.1f, &g_app.fx_ui.chorus.rate, 5.0f, 0.1f);
             if (fabsf(g_app.fx_ui.chorus.rate - prev_rate) > 0.0001f) {
-                param_queue_push(PARAM_FX_CHORUS_RATE, g_app.fx_ui.chorus.rate);
+                enqueue_param_float_user(PARAM_FX_CHORUS_RATE, g_app.fx_ui.chorus.rate);
             }
             nk_label(ctx, "Depth", NK_TEXT_LEFT);
             float prev_depth = g_app.fx_ui.chorus.depth;
             nk_slider_float(ctx, 1.0f, &g_app.fx_ui.chorus.depth, 50.0f, 1.0f);
             if (fabsf(g_app.fx_ui.chorus.depth - prev_depth) > 0.0001f) {
-                param_queue_push(PARAM_FX_CHORUS_DEPTH, g_app.fx_ui.chorus.depth);
+                enqueue_param_float_user(PARAM_FX_CHORUS_DEPTH, g_app.fx_ui.chorus.depth);
             }
             nk_label(ctx, "Mix", NK_TEXT_LEFT);
             float prev_mix = g_app.fx_ui.chorus.mix;
             nk_slider_float(ctx, 0.0f, &g_app.fx_ui.chorus.mix, 1.0f, 0.01f);
             if (fabsf(g_app.fx_ui.chorus.mix - prev_mix) > 0.0001f) {
-                param_queue_push(PARAM_FX_CHORUS_MIX, g_app.fx_ui.chorus.mix);
+                enqueue_param_float_user(PARAM_FX_CHORUS_MIX, g_app.fx_ui.chorus.mix);
             }
         }
         nk_group_end(ctx);
@@ -1566,7 +1952,7 @@ static void draw_delay_card(struct nk_context* ctx) {
         nk_bool prev_enabled = g_app.fx_ui.delay.enabled;
         nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.delay.enabled);
         if (prev_enabled != g_app.fx_ui.delay.enabled) {
-            param_queue_push(PARAM_FX_DELAY_ENABLED, g_app.fx_ui.delay.enabled ? 1.0f : 0.0f);
+            enqueue_param_bool_user(PARAM_FX_DELAY_ENABLED, g_app.fx_ui.delay.enabled);
         }
         if (g_app.fx_ui.delay.enabled) {
             nk_layout_row_dynamic(ctx, 25, 1);
@@ -1574,19 +1960,19 @@ static void draw_delay_card(struct nk_context* ctx) {
             float prev_time = g_app.fx_ui.delay.time;
             nk_slider_float(ctx, 0.05f, &g_app.fx_ui.delay.time, 2.0f, 0.01f);
             if (fabsf(g_app.fx_ui.delay.time - prev_time) > 0.0001f) {
-                param_queue_push(PARAM_FX_DELAY_TIME, g_app.fx_ui.delay.time);
+                enqueue_param_float_user(PARAM_FX_DELAY_TIME, g_app.fx_ui.delay.time);
             }
             nk_label(ctx, "Feedback", NK_TEXT_LEFT);
             float prev_feedback = g_app.fx_ui.delay.feedback;
             nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.feedback, 0.95f, 0.01f);
             if (fabsf(g_app.fx_ui.delay.feedback - prev_feedback) > 0.0001f) {
-                param_queue_push(PARAM_FX_DELAY_FEEDBACK, g_app.fx_ui.delay.feedback);
+                enqueue_param_float_user(PARAM_FX_DELAY_FEEDBACK, g_app.fx_ui.delay.feedback);
             }
             nk_label(ctx, "Mix", NK_TEXT_LEFT);
             float prev_mix = g_app.fx_ui.delay.mix;
             nk_slider_float(ctx, 0.0f, &g_app.fx_ui.delay.mix, 1.0f, 0.01f);
             if (fabsf(g_app.fx_ui.delay.mix - prev_mix) > 0.0001f) {
-                param_queue_push(PARAM_FX_DELAY_MIX, g_app.fx_ui.delay.mix);
+                enqueue_param_float_user(PARAM_FX_DELAY_MIX, g_app.fx_ui.delay.mix);
             }
         }
         nk_group_end(ctx);
@@ -1599,7 +1985,7 @@ static void draw_reverb_card(struct nk_context* ctx) {
         nk_bool prev_enabled = g_app.fx_ui.reverb.enabled;
         nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.reverb.enabled);
         if (prev_enabled != g_app.fx_ui.reverb.enabled) {
-            param_queue_push(PARAM_FX_REVERB_ENABLED, g_app.fx_ui.reverb.enabled ? 1.0f : 0.0f);
+            enqueue_param_bool_user(PARAM_FX_REVERB_ENABLED, g_app.fx_ui.reverb.enabled);
         }
         if (g_app.fx_ui.reverb.enabled) {
             nk_layout_row_dynamic(ctx, 120, 3);
@@ -1608,15 +1994,15 @@ static void draw_reverb_card(struct nk_context* ctx) {
             float prev_mix = g_app.fx_ui.reverb.mix;
             if (draw_knob(ctx, "Size", &g_app.fx_ui.reverb.size, 0.1f, 0.95f, 0.01f) &&
                 fabsf(g_app.fx_ui.reverb.size - prev_size) > 0.0001f) {
-                param_queue_push(PARAM_FX_REVERB_SIZE, g_app.fx_ui.reverb.size);
+                enqueue_param_float_user(PARAM_FX_REVERB_SIZE, g_app.fx_ui.reverb.size);
             }
             if (draw_knob(ctx, "Damping", &g_app.fx_ui.reverb.damping, 0.0f, 0.99f, 0.01f) &&
                 fabsf(g_app.fx_ui.reverb.damping - prev_damping) > 0.0001f) {
-                param_queue_push(PARAM_FX_REVERB_DAMPING, g_app.fx_ui.reverb.damping);
+                enqueue_param_float_user(PARAM_FX_REVERB_DAMPING, g_app.fx_ui.reverb.damping);
             }
             if (draw_knob(ctx, "Mix", &g_app.fx_ui.reverb.mix, 0.0f, 1.0f, 0.01f) &&
                 fabsf(g_app.fx_ui.reverb.mix - prev_mix) > 0.0001f) {
-                param_queue_push(PARAM_FX_REVERB_MIX, g_app.fx_ui.reverb.mix);
+                enqueue_param_float_user(PARAM_FX_REVERB_MIX, g_app.fx_ui.reverb.mix);
             }
         }
         nk_group_end(ctx);
@@ -1629,7 +2015,7 @@ static void draw_compressor_card(struct nk_context* ctx) {
         nk_bool prev_enabled = g_app.fx_ui.compressor.enabled;
         nk_checkbox_label(ctx, "Enabled", &g_app.fx_ui.compressor.enabled);
         if (prev_enabled != g_app.fx_ui.compressor.enabled) {
-            param_queue_push(PARAM_FX_COMP_ENABLED, g_app.fx_ui.compressor.enabled ? 1.0f : 0.0f);
+            enqueue_param_bool_user(PARAM_FX_COMP_ENABLED, g_app.fx_ui.compressor.enabled);
         }
         if (g_app.fx_ui.compressor.enabled) {
             nk_layout_row_dynamic(ctx, 120, 2);
@@ -1637,11 +2023,11 @@ static void draw_compressor_card(struct nk_context* ctx) {
             float prev_ratio = g_app.fx_ui.compressor.ratio;
             if (draw_knob(ctx, "Threshold", &g_app.fx_ui.compressor.threshold, 0.0f, 1.0f, 0.01f) &&
                 fabsf(g_app.fx_ui.compressor.threshold - prev_threshold) > 0.0001f) {
-                param_queue_push(PARAM_FX_COMP_THRESHOLD, g_app.fx_ui.compressor.threshold);
+                enqueue_param_float_user(PARAM_FX_COMP_THRESHOLD, g_app.fx_ui.compressor.threshold);
             }
             if (draw_knob(ctx, "Ratio", &g_app.fx_ui.compressor.ratio, 1.0f, 20.0f, 0.1f) &&
                 fabsf(g_app.fx_ui.compressor.ratio - prev_ratio) > 0.0001f) {
-                param_queue_push(PARAM_FX_COMP_RATIO, g_app.fx_ui.compressor.ratio);
+                enqueue_param_float_user(PARAM_FX_COMP_RATIO, g_app.fx_ui.compressor.ratio);
             }
         }
         nk_group_end(ctx);
@@ -1661,19 +2047,19 @@ static void draw_synth_panel(struct nk_context* ctx) {
 
         if (draw_knob(ctx, "Master", &g_app.master_volume_ui, 0.0f, 1.0f, 0.01f) &&
             fabsf(g_app.master_volume_ui - prev_master) > 0.0001f) {
-            param_queue_push(PARAM_MASTER_VOLUME, g_app.master_volume_ui);
+            enqueue_param_float_user(PARAM_MASTER_VOLUME, g_app.master_volume_ui);
         }
         if (draw_knob(ctx, "Cutoff", &g_app.filter_cutoff, 20.0f, 20000.0f, 50.0f) &&
             fabsf(g_app.filter_cutoff - prev_cutoff) > 1.0f) {
-            param_queue_push(PARAM_FILTER_CUTOFF, g_app.filter_cutoff);
+            enqueue_param_float_user(PARAM_FILTER_CUTOFF, g_app.filter_cutoff);
         }
         if (draw_knob(ctx, "Resonance", &g_app.filter_resonance, 0.0f, 1.0f, 0.01f) &&
             fabsf(g_app.filter_resonance - prev_res) > 0.0001f) {
-            param_queue_push(PARAM_FILTER_RESONANCE, g_app.filter_resonance);
+            enqueue_param_float_user(PARAM_FILTER_RESONANCE, g_app.filter_resonance);
         }
         if (draw_knob(ctx, "Env Amt", &g_app.filter_env, -1.0f, 1.0f, 0.01f) &&
             fabsf(g_app.filter_env - prev_env_amt) > 0.0001f) {
-            param_queue_push(PARAM_FILTER_ENV_AMOUNT, g_app.filter_env);
+            enqueue_param_float_user(PARAM_FILTER_ENV_AMOUNT, g_app.filter_env);
         }
 
         const char* filter_modes[] = {"LP", "HP", "BP", "Notch", "Allpass"};
@@ -1683,7 +2069,7 @@ static void draw_synth_panel(struct nk_context* ctx) {
         int selected_mode = nk_combo(ctx, filter_modes, 5, prev_filter_mode, 24, nk_vec2(180, 140));
         if (selected_mode != prev_filter_mode) {
             g_app.filter_mode = (FilterMode)selected_mode;
-            param_queue_push(PARAM_FILTER_MODE, (float)selected_mode);
+            enqueue_param_int_user(PARAM_FILTER_MODE, selected_mode);
         }
         nk_group_end(ctx);
     }
@@ -1697,19 +2083,19 @@ static void draw_synth_panel(struct nk_context* ctx) {
 
         if (draw_knob(ctx, "Attack", &g_app.env_attack, 0.001f, 2.0f, 0.005f) &&
             fabsf(g_app.env_attack - prev_attack) > 0.0001f) {
-            param_queue_push(PARAM_ENV_ATTACK, g_app.env_attack);
+            enqueue_param_float_user(PARAM_ENV_ATTACK, g_app.env_attack);
         }
         if (draw_knob(ctx, "Decay", &g_app.env_decay, 0.001f, 2.0f, 0.005f) &&
             fabsf(g_app.env_decay - prev_decay) > 0.0001f) {
-            param_queue_push(PARAM_ENV_DECAY, g_app.env_decay);
+            enqueue_param_float_user(PARAM_ENV_DECAY, g_app.env_decay);
         }
         if (draw_knob(ctx, "Sustain", &g_app.env_sustain, 0.0f, 1.0f, 0.01f) &&
             fabsf(g_app.env_sustain - prev_sustain) > 0.0001f) {
-            param_queue_push(PARAM_ENV_SUSTAIN, g_app.env_sustain);
+            enqueue_param_float_user(PARAM_ENV_SUSTAIN, g_app.env_sustain);
         }
         if (draw_knob(ctx, "Release", &g_app.env_release, 0.001f, 5.0f, 0.01f) &&
             fabsf(g_app.env_release - prev_release) > 0.0001f) {
-            param_queue_push(PARAM_ENV_RELEASE, g_app.env_release);
+            enqueue_param_float_user(PARAM_ENV_RELEASE, g_app.env_release);
         }
 
         nk_layout_row_dynamic(ctx, 26, 1);
@@ -1727,7 +2113,7 @@ static void draw_synth_panel(struct nk_context* ctx) {
         nk_bool prev_arp_enabled = g_app.arp_ui.enabled;
         nk_checkbox_label(ctx, "Enabled", &g_app.arp_ui.enabled);
         if (prev_arp_enabled != g_app.arp_ui.enabled) {
-            param_queue_push(PARAM_ARP_ENABLED, g_app.arp_ui.enabled ? 1.0f : 0.0f);
+            enqueue_param_bool_user(PARAM_ARP_ENABLED, g_app.arp_ui.enabled);
         }
 
         nk_layout_row_dynamic(ctx, 24, 1);
@@ -1749,7 +2135,7 @@ static void draw_synth_panel(struct nk_context* ctx) {
             }
             if (nk_button_label_styled(ctx, &style, label) && g_app.arp_ui.rate_index != i) {
                 g_app.arp_ui.rate_index = i;
-                param_queue_push(PARAM_ARP_RATE, multiplier);
+                enqueue_param_float_user(PARAM_ARP_RATE, multiplier);
             }
         }
 
@@ -1759,7 +2145,7 @@ static void draw_synth_panel(struct nk_context* ctx) {
         int prev_arp_mode = g_app.arp_ui.mode;
         g_app.arp_ui.mode = nk_combo(ctx, arp_modes, 5, g_app.arp_ui.mode, 24, nk_vec2(200, 140));
         if (g_app.arp_ui.mode != prev_arp_mode) {
-            param_queue_push(PARAM_ARP_MODE, (float)g_app.arp_ui.mode);
+            enqueue_param_int_user(PARAM_ARP_MODE, g_app.arp_ui.mode);
         }
         nk_group_end(ctx);
     }
@@ -1808,7 +2194,7 @@ static void draw_loop_panel(struct nk_context* ctx) {
         }
 
         if (nk_button_label(ctx, "PANIC")) {
-            param_queue_push(PARAM_PANIC, 0.0f);
+            enqueue_param_bool(PARAM_PANIC, true);
         }
 
         Loop* loop = &g_app.loop_recorder.loops[g_app.loop_recorder.current_loop];
@@ -1891,8 +2277,11 @@ static void draw_sample_loader_panel(struct nk_context* ctx) {
         nk_layout_row_dynamic(ctx, 18, 1);
         nk_label(ctx, "WAV File", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 26, 1);
-        nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, g_app.sample_path_input,
-                                       sizeof(g_app.sample_path_input), nk_filter_default);
+        nk_flags sample_flags = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, g_app.sample_path_input,
+                                                              sizeof(g_app.sample_path_input), nk_filter_default);
+        if (sample_flags & NK_EDIT_CHANGED) {
+            mark_project_dirty();
+        }
 
         nk_layout_row_dynamic(ctx, 26, 3);
         if (nk_button_label(ctx, "Load")) {
@@ -1925,11 +2314,18 @@ static void draw_export_panel(struct nk_context* ctx) {
         nk_layout_row_dynamic(ctx, 18, 1);
         nk_label(ctx, "Output Path", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 26, 1);
-        nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, g_app.export_path_input,
-                                       sizeof(g_app.export_path_input), nk_filter_default);
+        nk_flags export_flags = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, g_app.export_path_input,
+                                                              sizeof(g_app.export_path_input), nk_filter_default);
+        if (export_flags & NK_EDIT_CHANGED) {
+            mark_project_dirty();
+        }
 
         nk_layout_row_dynamic(ctx, 24, 1);
+        float prev_duration = g_app.export_duration_seconds;
         nk_property_float(ctx, "Length (s)", 1.0f, &g_app.export_duration_seconds, 60.0f, 0.5f, 0.1f);
+        if (fabsf(g_app.export_duration_seconds - prev_duration) > 0.0001f) {
+            mark_project_dirty();
+        }
 
         nk_layout_row_dynamic(ctx, 28, 1);
         if (nk_button_label(ctx, "Render to WAV")) {
@@ -2010,7 +2406,7 @@ static void draw_transport_bar(struct nk_context* ctx) {
             atomic_store(&g_app.sampler.stop_pending, true);
         }
         if (nk_button_label(ctx, "PANIC")) {
-            param_queue_push(PARAM_PANIC, 0.0f);
+            enqueue_param_bool(PARAM_PANIC, true);
         }
 
         nk_layout_row_dynamic(ctx, 30, 3);
@@ -2018,7 +2414,7 @@ static void draw_transport_bar(struct nk_context* ctx) {
         float prev_tempo = g_app.tempo_ui;
         nk_slider_float(ctx, 60.0f, &g_app.tempo_ui, 200.0f, 0.5f);
         if (fabsf(g_app.tempo_ui - prev_tempo) > 0.01f) {
-            param_queue_push(PARAM_TEMPO, g_app.tempo_ui);
+            enqueue_param_float_user(PARAM_TEMPO, g_app.tempo_ui);
         }
         char tempo_text[32];
         snprintf(tempo_text, sizeof(tempo_text), "%.1f BPM", g_app.tempo_ui);
@@ -2037,105 +2433,110 @@ static void draw_fx_panel(struct nk_context* ctx);
 static void draw_loop_panel(struct nk_context* ctx);
 static void draw_drums_panel(struct nk_context* ctx);
 
-static void apply_param_change(const ParamChange* change, void* userdata) {
+static void apply_param_change(const ParamMsg* change, void* userdata) {
     (void)userdata;
-    float value = change->value;
-    switch (change->type) {
+    if (!change) return;
+
+    float fvalue = param_msg_as_float(change);
+    bool bvalue = param_msg_as_bool(change);
+    int  ivalue = param_msg_as_int(change);
+
+    switch ((ParamId)change->id) {
         case PARAM_MASTER_VOLUME:
-            g_app.master_volume = clampf(value, 0.0f, 1.0f);
+            g_app.master_volume = clampf(fvalue, 0.0f, 1.0f);
             break;
         case PARAM_TEMPO:
-            g_app.tempo = clampf(value, 40.0f, 260.0f);
+            g_app.tempo = clampf(fvalue, 40.0f, 260.0f);
             break;
         case PARAM_FX_DISTORTION_ENABLED:
-            g_app.fx.distortion.enabled = value > 0.5f;
+            g_app.fx.distortion.enabled = bvalue;
             break;
         case PARAM_FX_DISTORTION_DRIVE:
-            g_app.fx.distortion.drive = clampf(value, 1.0f, 20.0f);
+            g_app.fx.distortion.drive = clampf(fvalue, 1.0f, 20.0f);
             break;
         case PARAM_FX_DISTORTION_MIX:
-            g_app.fx.distortion.mix = clampf(value, 0.0f, 1.0f);
+            g_app.fx.distortion.mix = clampf(fvalue, 0.0f, 1.0f);
             break;
         case PARAM_FX_CHORUS_ENABLED:
-            g_app.fx.chorus.enabled = value > 0.5f;
+            g_app.fx.chorus.enabled = bvalue;
             break;
         case PARAM_FX_CHORUS_RATE:
-            g_app.fx.chorus.rate = clampf(value, 0.1f, 5.0f);
+            g_app.fx.chorus.rate = clampf(fvalue, 0.1f, 5.0f);
             break;
         case PARAM_FX_CHORUS_DEPTH:
-            g_app.fx.chorus.depth = clampf(value, 1.0f, 50.0f);
+            g_app.fx.chorus.depth = clampf(fvalue, 1.0f, 50.0f);
             break;
         case PARAM_FX_CHORUS_MIX:
-            g_app.fx.chorus.mix = clampf(value, 0.0f, 1.0f);
+            g_app.fx.chorus.mix = clampf(fvalue, 0.0f, 1.0f);
             break;
         case PARAM_FX_COMP_ENABLED:
-            g_app.fx.compressor.enabled = value > 0.5f;
+            g_app.fx.compressor.enabled = bvalue;
             break;
         case PARAM_FX_COMP_THRESHOLD:
-            g_app.fx.compressor.threshold = clampf(value, 0.0f, 1.0f);
+            g_app.fx.compressor.threshold = clampf(fvalue, 0.0f, 1.0f);
             break;
         case PARAM_FX_COMP_RATIO:
-            g_app.fx.compressor.ratio = clampf(value, 1.0f, 20.0f);
+            g_app.fx.compressor.ratio = clampf(fvalue, 1.0f, 20.0f);
             break;
         case PARAM_FX_DELAY_ENABLED:
-            g_app.fx.delay.enabled = value > 0.5f;
+            g_app.fx.delay.enabled = bvalue;
             break;
         case PARAM_FX_DELAY_TIME:
-            g_app.fx.delay.time = clampf(value, 0.05f, 2.0f);
+            g_app.fx.delay.time = clampf(fvalue, 0.05f, 2.0f);
             break;
         case PARAM_FX_DELAY_FEEDBACK:
-            g_app.fx.delay.feedback = clampf(value, 0.0f, 0.99f);
+            g_app.fx.delay.feedback = clampf(fvalue, 0.0f, 0.99f);
             break;
         case PARAM_FX_DELAY_MIX:
-            g_app.fx.delay.mix = clampf(value, 0.0f, 1.0f);
+            g_app.fx.delay.mix = clampf(fvalue, 0.0f, 1.0f);
             break;
         case PARAM_FX_REVERB_ENABLED:
-            g_app.fx.reverb.enabled = value > 0.5f;
+            g_app.fx.reverb.enabled = bvalue;
             break;
         case PARAM_FX_REVERB_SIZE:
-            g_app.fx.reverb.size = clampf(value, 0.1f, 0.95f);
+            g_app.fx.reverb.size = clampf(fvalue, 0.1f, 0.95f);
             break;
         case PARAM_FX_REVERB_DAMPING:
-            g_app.fx.reverb.damping = clampf(value, 0.0f, 0.99f);
+            g_app.fx.reverb.damping = clampf(fvalue, 0.0f, 0.99f);
             break;
         case PARAM_FX_REVERB_MIX:
-            g_app.fx.reverb.mix = clampf(value, 0.0f, 1.0f);
+            g_app.fx.reverb.mix = clampf(fvalue, 0.0f, 1.0f);
             break;
         case PARAM_ARP_ENABLED:
-            g_app.arp.enabled = value > 0.5f;
+            g_app.arp.enabled = bvalue;
             if (!g_app.arp.enabled && g_app.arp.last_played_note >= 0) {
                 synth_note_off(&g_app.synth, g_app.arp.last_played_note);
                 g_app.arp.last_played_note = -1;
             }
             break;
         case PARAM_ARP_RATE: {
-                int idx = arp_multiplier_index_for_value(value);
+                int idx = arp_multiplier_index_for_value(fvalue);
                 g_app.arp.rate = arp_multiplier_value(idx);
                 break;
             }
         case PARAM_ARP_MODE: {
-                int mode = (int)(value + 0.5f);
+                int mode = ivalue;
                 if (mode < ARP_OFF) mode = ARP_OFF;
                 if (mode > ARP_RANDOM) mode = ARP_RANDOM;
                 g_app.arp.mode = (ArpMode)mode;
                 break;
             }
         case PARAM_FILTER_CUTOFF: {
-                float cutoff = clampf(value, 20.0f, 20000.0f);
+                float cutoff = clampf(fvalue, 20.0f, 20000.0f);
                 for (int i = 0; i < MAX_VOICES; i++) {
                     g_app.synth.voices[i].filter.cutoff = cutoff;
                 }
                 break;
             }
         case PARAM_FILTER_RESONANCE: {
-                float resonance = clampf(value, 0.0f, 1.0f);
+                float resonance = clampf(fvalue, 0.0f, 1.0f);
                 for (int i = 0; i < MAX_VOICES; i++) {
                     g_app.synth.voices[i].filter.resonance = resonance;
                 }
                 break;
             }
         case PARAM_FILTER_MODE: {
-                int mode = (int)(value + 0.5f);
+                int mode = ivalue;
                 if (mode < FILTER_LP) mode = FILTER_LP;
                 if (mode >= FILTER_COUNT) mode = FILTER_COUNT - 1;
                 for (int i = 0; i < MAX_VOICES; i++) {
@@ -2144,35 +2545,35 @@ static void apply_param_change(const ParamChange* change, void* userdata) {
                 break;
             }
         case PARAM_FILTER_ENV_AMOUNT: {
-                float amount = clampf(value, -1.0f, 1.0f);
+                float amount = clampf(fvalue, -1.0f, 1.0f);
                 for (int i = 0; i < MAX_VOICES; i++) {
                     g_app.synth.voices[i].filter.env_amount = amount;
                 }
                 break;
             }
         case PARAM_ENV_ATTACK: {
-                float attack = clampf(value, 0.001f, 2.0f);
+                float attack = clampf(fvalue, 0.001f, 2.0f);
                 for (int i = 0; i < MAX_VOICES; i++) {
                     g_app.synth.voices[i].env_amp.attack = attack;
                 }
                 break;
             }
         case PARAM_ENV_DECAY: {
-                float decay = clampf(value, 0.001f, 2.0f);
+                float decay = clampf(fvalue, 0.001f, 2.0f);
                 for (int i = 0; i < MAX_VOICES; i++) {
                     g_app.synth.voices[i].env_amp.decay = decay;
                 }
                 break;
             }
         case PARAM_ENV_SUSTAIN: {
-                float sustain = clampf(value, 0.0f, 1.0f);
+                float sustain = clampf(fvalue, 0.0f, 1.0f);
                 for (int i = 0; i < MAX_VOICES; i++) {
                     g_app.synth.voices[i].env_amp.sustain = sustain;
                 }
                 break;
             }
         case PARAM_ENV_RELEASE: {
-                float release = clampf(value, 0.001f, 5.0f);
+                float release = clampf(fvalue, 0.001f, 5.0f);
                 for (int i = 0; i < MAX_VOICES; i++) {
                     g_app.synth.voices[i].env_amp.release = release;
                 }
@@ -2266,11 +2667,11 @@ static void handle_midi_event(const MidiEvent* event, void* userdata) {
             if (event->data1 == 1) { // Mod wheel → filter cutoff sweep
                 float normalized = (float)event->data2 / 127.0f;
                 float cutoff = 200.0f + normalized * 19800.0f;
-                param_queue_push(PARAM_FILTER_CUTOFF, cutoff);
+                enqueue_param_float(PARAM_FILTER_CUTOFF, cutoff);
             } else if (event->data1 == 74) { // CC74 often "brightness"
                 float normalized = (float)event->data2 / 127.0f;
                 float resonance = normalized;
-                param_queue_push(PARAM_FILTER_RESONANCE, resonance);
+                enqueue_param_float(PARAM_FILTER_RESONANCE, resonance);
             }
             break;
         }
@@ -2613,7 +3014,7 @@ int main(void) {
         // ESC = panic
         if (glfwGetKey(g_app.window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
             if (!esc_was_pressed) {
-                param_queue_push(PARAM_PANIC, 0.0f);
+                enqueue_param_bool(PARAM_PANIC, true);
                 esc_was_pressed = true;
             }
         } else {

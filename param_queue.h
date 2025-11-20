@@ -3,68 +3,38 @@
 
 #include "pa_ringbuffer.h"
 #include <stdint.h>
+#include <stdbool.h>
+#include "synth_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Types of parameters that can be changed
-typedef enum {
-    PARAM_MASTER_VOLUME = 0,
-    PARAM_TEMPO,
-    PARAM_FX_DISTORTION_ENABLED,
-    PARAM_FX_DISTORTION_DRIVE,
-    PARAM_FX_DISTORTION_MIX,
-    PARAM_FX_CHORUS_ENABLED,
-    PARAM_FX_CHORUS_RATE,
-    PARAM_FX_CHORUS_DEPTH,
-    PARAM_FX_CHORUS_MIX,
-    PARAM_FX_COMP_ENABLED,
-    PARAM_FX_COMP_THRESHOLD,
-    PARAM_FX_COMP_RATIO,
-    PARAM_FX_DELAY_ENABLED,
-    PARAM_FX_DELAY_TIME,
-    PARAM_FX_DELAY_FEEDBACK,
-    PARAM_FX_DELAY_MIX,
-    PARAM_FX_REVERB_ENABLED,
-    PARAM_FX_REVERB_SIZE,
-    PARAM_FX_REVERB_DAMPING,
-    PARAM_FX_REVERB_MIX,
-    PARAM_ARP_ENABLED,
-    PARAM_ARP_RATE,
-    PARAM_ARP_MODE,
-    PARAM_FILTER_CUTOFF,
-    PARAM_FILTER_RESONANCE,
-    PARAM_FILTER_MODE,
-    PARAM_FILTER_ENV_AMOUNT,
-    PARAM_ENV_ATTACK,
-    PARAM_ENV_DECAY,
-    PARAM_ENV_SUSTAIN,
-    PARAM_ENV_RELEASE,
-    PARAM_PANIC,
-} ParamType;
-
-// Structure for a parameter change
-typedef struct {
-    ParamType type;
-    float value;
-} ParamChange;
-
 // Global ring buffer size
 #define PARAM_QUEUE_SIZE 256
+#define MIDI_QUEUE_SIZE 256
+#define SEQ_QUEUE_SIZE 512
 
 // Initialize the parameter queue system
 void param_queue_init(void);
 
-// Push a parameter change from UI thread (returns 1 on success, 0 if full)
-int param_queue_push(ParamType type, float value);
+// Push a parameter change from UI thread (returns true on success)
+bool param_queue_enqueue(const ParamMsg* msg);
 
-// Pop a single parameter change in the audio thread (returns 1 when available)
-int param_queue_pop(ParamChange* out_change);
+// Pop a single parameter change in the audio thread
+bool param_queue_dequeue(ParamMsg* out_change);
 
 // Drain all pending changes while invoking a callback (optional helper)
-typedef void (*param_queue_handler)(const ParamChange* change, void* userdata);
+typedef void (*param_queue_handler)(const ParamMsg* change, void* userdata);
 void param_queue_drain(param_queue_handler handler, void* userdata);
+
+// MIDI event queue helpers
+bool midi_queue_enqueue(const MidiEvent* event);
+bool midi_queue_dequeue(MidiEvent* event);
+
+// Sequencer event queue helpers
+bool seq_event_enqueue(const SeqEvent* event);
+bool seq_event_dequeue(SeqEvent* event);
 
 #ifdef __cplusplus
 }

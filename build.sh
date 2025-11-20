@@ -144,7 +144,7 @@ build_gui_target() {
     ensure_macos
     detect_glfw
 
-    local cflags=(-std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-deprecated-declarations -DGL_SILENCE_DEPRECATION)
+    local cflags=(-std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-deprecated-declarations -DGL_SILENCE_DEPRECATION -Ithird_party/cjson)
     cflags+=("${GLFW_INCLUDE[@]}")
 
     local frameworks=(
@@ -194,7 +194,10 @@ case "$TARGET" in
             pa_ringbuffer.c \
             nuklear_impl.c \
             midi_input.c \
-            sample_io.c
+            sample_io.c \
+            preset.c \
+            project.c \
+            third_party/cjson/cJSON.c
         ;;
     synth_complete)
         build_gui_target "synth_complete" \
@@ -203,7 +206,9 @@ case "$TARGET" in
             param_queue.c \
             pa_ringbuffer.c \
             nuklear_impl.c
-        ;;
+            preset.c \
+            project.c \
+            third_party/cjson/cJSON.c \
     *)
         echo "Unhandled target: $TARGET" >&2
         exit 1
