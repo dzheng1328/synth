@@ -144,7 +144,7 @@ build_gui_target() {
     ensure_macos
     detect_glfw
 
-    local cflags=(-std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-deprecated-declarations -DGL_SILENCE_DEPRECATION -Ithird_party/cjson)
+    local cflags=(-std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-deprecated-declarations -DGL_SILENCE_DEPRECATION -I"$ROOT_DIR" -Ithird_party/cjson)
     cflags+=("${GLFW_INCLUDE[@]}")
 
     local frameworks=(
@@ -208,6 +208,9 @@ case "$TARGET" in
             nuklear_impl.c \
             midi_input.c \
             midi_shim.c \
+            ui/style.c \
+            ui/draw_helpers.c \
+            ui/knob_custom.c \
             preset.c \
             project.c \
             third_party/cjson/cJSON.c
