@@ -69,36 +69,6 @@ static void enqueue_param_int(ParamId id, int value) {
     }
 }
 
-static float param_msg_as_float(const ParamMsg* msg) {
-    if (!msg) return 0.0f;
-    switch (msg->type) {
-        case PARAM_FLOAT: return msg->value.f;
-        case PARAM_INT:   return (float)msg->value.i;
-        case PARAM_BOOL:  return msg->value.b ? 1.0f : 0.0f;
-        default:          return 0.0f;
-    }
-}
-
-static int param_msg_as_int(const ParamMsg* msg) {
-    if (!msg) return 0;
-    switch (msg->type) {
-        case PARAM_INT:   return msg->value.i;
-        case PARAM_FLOAT: return (int)lroundf(msg->value.f);
-        case PARAM_BOOL:  return msg->value.b != 0;
-        default:          return 0;
-    }
-}
-
-static bool param_msg_as_bool(const ParamMsg* msg) {
-    if (!msg) return false;
-    switch (msg->type) {
-        case PARAM_BOOL:  return msg->value.b != 0;
-        case PARAM_INT:   return msg->value.i != 0;
-        case PARAM_FLOAT: return fabsf(msg->value.f) > 0.5f;
-        default:          return false;
-    }
-}
-
 static void dispatch_note_on(uint8_t note, float velocity);
 static void dispatch_note_off(uint8_t note);
 static void apply_param_change(const ParamMsg* change, void* userdata);
@@ -2437,17 +2407,39 @@ static void apply_param_change(const ParamMsg* change, void* userdata) {
     (void)userdata;
     if (!change) return;
 
-    float fvalue = param_msg_as_float(change);
-    bool bvalue = param_msg_as_bool(change);
-    int  ivalue = param_msg_as_int(change);
+    ParamId id = (ParamId)change->id;
+    float fvalue = param_msg_get_float(change);
+    bool bvalue = param_msg_get_bool(change);
+    int  ivalue = param_msg_get_int(change);
 
-    switch ((ParamId)change->id) {
+    bool handled_in_engine = synth_engine_apply_param(&g_app.synth, change);
+
+    switch (id) {
         case PARAM_MASTER_VOLUME:
             g_app.master_volume = clampf(fvalue, 0.0f, 1.0f);
-            break;
+            return;
         case PARAM_TEMPO:
             g_app.tempo = clampf(fvalue, 40.0f, 260.0f);
+            return;
+        case PARAM_PANIC:
+            if (!handled_in_engine) {
+                synth_all_notes_off(&g_app.synth);
+            }
+            g_app.arp.num_held = 0;
+            g_app.arp.last_played_note = -1;
+            memset(g_app.keyboard_ui.note_active, 0, sizeof(g_app.keyboard_ui.note_active));
+            g_app.keyboard_ui.mouse_dragging = false;
+            g_app.keyboard_ui.mouse_active_note = -1;
+            return;
+        default:
             break;
+    }
+
+    if (handled_in_engine) {
+        return;
+    }
+
+    switch (id) {
         case PARAM_FX_DISTORTION_ENABLED:
             g_app.fx.distortion.enabled = bvalue;
             break;
@@ -2521,72 +2513,6 @@ static void apply_param_change(const ParamMsg* change, void* userdata) {
                 g_app.arp.mode = (ArpMode)mode;
                 break;
             }
-        case PARAM_FILTER_CUTOFF: {
-                float cutoff = clampf(fvalue, 20.0f, 20000.0f);
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].filter.cutoff = cutoff;
-                }
-                break;
-            }
-        case PARAM_FILTER_RESONANCE: {
-                float resonance = clampf(fvalue, 0.0f, 1.0f);
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].filter.resonance = resonance;
-                }
-                break;
-            }
-        case PARAM_FILTER_MODE: {
-                int mode = ivalue;
-                if (mode < FILTER_LP) mode = FILTER_LP;
-                if (mode >= FILTER_COUNT) mode = FILTER_COUNT - 1;
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].filter.mode = (FilterMode)mode;
-                }
-                break;
-            }
-        case PARAM_FILTER_ENV_AMOUNT: {
-                float amount = clampf(fvalue, -1.0f, 1.0f);
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].filter.env_amount = amount;
-                }
-                break;
-            }
-        case PARAM_ENV_ATTACK: {
-                float attack = clampf(fvalue, 0.001f, 2.0f);
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].env_amp.attack = attack;
-                }
-                break;
-            }
-        case PARAM_ENV_DECAY: {
-                float decay = clampf(fvalue, 0.001f, 2.0f);
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].env_amp.decay = decay;
-                }
-                break;
-            }
-        case PARAM_ENV_SUSTAIN: {
-                float sustain = clampf(fvalue, 0.0f, 1.0f);
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].env_amp.sustain = sustain;
-                }
-                break;
-            }
-        case PARAM_ENV_RELEASE: {
-                float release = clampf(fvalue, 0.001f, 5.0f);
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].env_amp.release = release;
-                }
-                break;
-            }
-        case PARAM_PANIC:
-            synth_all_notes_off(&g_app.synth);
-            g_app.arp.num_held = 0;
-            g_app.arp.last_played_note = -1;
-            memset(g_app.keyboard_ui.note_active, 0, sizeof(g_app.keyboard_ui.note_active));
-            g_app.keyboard_ui.mouse_dragging = false;
-            g_app.keyboard_ui.mouse_active_note = -1;
-            break;
         default:
             break;
     }

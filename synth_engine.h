@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "synth_types.h"
 
 // ============================================================================
 // CONFIGURATION
@@ -293,6 +294,17 @@ typedef struct {
     bool mono_mode;
     bool legato_mode;
     float glide_time;         // Global glide time
+
+    // Cached parameter snapshot for filters/envelopes
+    float filter_cutoff;
+    float filter_resonance;
+    FilterMode filter_mode;
+    float filter_env_amount;
+
+    float env_attack;
+    float env_decay;
+    float env_sustain;
+    float env_release;
     
     // Protection
     float limiter_threshold;  // 0.0 to 1.0
@@ -317,6 +329,7 @@ void synth_note_on(SynthEngine* synth, int note, float velocity);
 void synth_note_off(SynthEngine* synth, int note);
 void synth_all_notes_off(SynthEngine* synth);
 void synth_pitch_bend(SynthEngine* synth, float amount);
+bool synth_engine_apply_param(SynthEngine* synth, const ParamMsg* msg);
 
 // Oscillator
 void osc_init(Oscillator* osc, float sample_rate);

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 #include "include/params.h"
 
 // ============================================================================
@@ -24,6 +25,36 @@ typedef struct {
         int   b;
     } value;
 } ParamMsg;
+
+static inline float param_msg_get_float(const ParamMsg* msg) {
+    if (!msg) return 0.0f;
+    switch (msg->type) {
+        case PARAM_FLOAT: return msg->value.f;
+        case PARAM_INT:   return (float)msg->value.i;
+        case PARAM_BOOL:  return msg->value.b ? 1.0f : 0.0f;
+        default:          return 0.0f;
+    }
+}
+
+static inline int param_msg_get_int(const ParamMsg* msg) {
+    if (!msg) return 0;
+    switch (msg->type) {
+        case PARAM_INT:   return msg->value.i;
+        case PARAM_FLOAT: return (int)lroundf(msg->value.f);
+        case PARAM_BOOL:  return msg->value.b != 0;
+        default:          return 0;
+    }
+}
+
+static inline bool param_msg_get_bool(const ParamMsg* msg) {
+    if (!msg) return false;
+    switch (msg->type) {
+        case PARAM_BOOL:  return msg->value.b != 0;
+        case PARAM_INT:   return msg->value.i != 0;
+        case PARAM_FLOAT: return fabsf(msg->value.f) > 0.5f;
+        default:          return false;
+    }
+}
 
 /* Example ParamMsg JSON:
    { "id": 1024, "type": "float", "value": 1200.0 }

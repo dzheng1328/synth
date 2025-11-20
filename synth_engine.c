@@ -670,6 +670,16 @@ void synth_init(SynthEngine* synth, float sample_rate) {
     synth->mono_mode = false;
     synth->legato_mode = false;
     synth->glide_time = 0.0f;
+
+    synth->filter_cutoff = 8000.0f;
+    synth->filter_resonance = 0.3f;
+    synth->filter_mode = FILTER_LP;
+    synth->filter_env_amount = 0.0f;
+
+    synth->env_attack = 0.01f;
+    synth->env_decay = 0.1f;
+    synth->env_sustain = 0.7f;
+    synth->env_release = 0.3f;
     
     synth->limiter_threshold = 0.95f;
     synth->limiter_release = 0.1f;
@@ -678,6 +688,15 @@ void synth_init(SynthEngine* synth, float sample_rate) {
     // Initialize voices
     for (int i = 0; i < MAX_VOICES; i++) {
         voice_init(&synth->voices[i], sample_rate);
+        synth->voices[i].filter.cutoff = synth->filter_cutoff;
+        synth->voices[i].filter.resonance = synth->filter_resonance;
+        synth->voices[i].filter.mode = synth->filter_mode;
+        synth->voices[i].filter.env_amount = synth->filter_env_amount;
+
+        synth->voices[i].env_amp.attack = synth->env_attack;
+        synth->voices[i].env_amp.decay = synth->env_decay;
+        synth->voices[i].env_amp.sustain = synth->env_sustain;
+        synth->voices[i].env_amp.release = synth->env_release;
     }
     
     // Initialize LFOs
@@ -773,6 +792,97 @@ void synth_pitch_bend(SynthEngine* synth, float amount) {
             synth->voices[i].pitch_bend = amount;
             synth->voices[i].target_pitch = midi_to_freq(synth->voices[i].midi_note) * bend_ratio;
         }
+    }
+}
+
+bool synth_engine_apply_param(SynthEngine* synth, const ParamMsg* msg) {
+    if (!synth || !msg) {
+        return false;
+    }
+
+    ParamId id = (ParamId)msg->id;
+    switch (id) {
+        case PARAM_MASTER_VOLUME: {
+            float volume = clamp(param_msg_get_float(msg), 0.0f, 1.0f);
+            synth->master_volume = volume;
+            return true;
+        }
+        case PARAM_TEMPO: {
+            float bpm = param_msg_get_float(msg);
+            synth_set_tempo(synth, bpm);
+            return true;
+        }
+        case PARAM_FILTER_CUTOFF: {
+            float cutoff = clamp(param_msg_get_float(msg), 20.0f, 20000.0f);
+            synth->filter_cutoff = cutoff;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].filter.cutoff = cutoff;
+            }
+            return true;
+        }
+        case PARAM_FILTER_RESONANCE: {
+            float resonance = clamp(param_msg_get_float(msg), 0.0f, 1.0f);
+            synth->filter_resonance = resonance;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].filter.resonance = resonance;
+            }
+            return true;
+        }
+        case PARAM_FILTER_MODE: {
+            int mode = param_msg_get_int(msg);
+            if (mode < FILTER_LP) mode = FILTER_LP;
+            if (mode >= FILTER_COUNT) mode = FILTER_COUNT - 1;
+            synth->filter_mode = (FilterMode)mode;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].filter.mode = synth->filter_mode;
+            }
+            return true;
+        }
+        case PARAM_FILTER_ENV_AMOUNT: {
+            float amount = clamp(param_msg_get_float(msg), -1.0f, 1.0f);
+            synth->filter_env_amount = amount;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].filter.env_amount = amount;
+            }
+            return true;
+        }
+        case PARAM_ENV_AMP_ATTACK: {
+            float attack = clamp(param_msg_get_float(msg), 0.001f, 2.0f);
+            synth->env_attack = attack;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].env_amp.attack = attack;
+            }
+            return true;
+        }
+        case PARAM_ENV_AMP_DECAY: {
+            float decay = clamp(param_msg_get_float(msg), 0.001f, 2.0f);
+            synth->env_decay = decay;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].env_amp.decay = decay;
+            }
+            return true;
+        }
+        case PARAM_ENV_AMP_SUSTAIN: {
+            float sustain = clamp(param_msg_get_float(msg), 0.0f, 1.0f);
+            synth->env_sustain = sustain;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].env_amp.sustain = sustain;
+            }
+            return true;
+        }
+        case PARAM_ENV_AMP_RELEASE: {
+            float release = clamp(param_msg_get_float(msg), 0.001f, 5.0f);
+            synth->env_release = release;
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                synth->voices[i].env_amp.release = release;
+            }
+            return true;
+        }
+        case PARAM_PANIC:
+            synth_all_notes_off(synth);
+            return true;
+        default:
+            return false;
     }
 }
 
