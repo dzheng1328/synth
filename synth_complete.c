@@ -25,6 +25,9 @@
 #include "synth_engine.h"
 #include "param_queue.h"
 #include "midi_input.h"
+#include "ui/style.h"
+#include "ui/draw_helpers.h"
+#include "ui/knob_custom.h"
 #include <GLFW/glfw3.h>
 
 #ifdef __APPLE__
@@ -36,6 +39,10 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+
+// Forward declarations for note helpers used by UI components
+void play_note(int midi_note, const char* label);
+void stop_note(int midi_note, const char* label);
 
 #define MAX_VERTEX_BUFFER 512 * 1024
 #define MAX_ELEMENT_BUFFER 128 * 1024
@@ -283,6 +290,12 @@ typedef struct {
     int loop_end;       // 0-15
 } Sequencer;
 
+typedef struct {
+    struct nk_rect bounds;
+    int start_note;
+    int num_octaves;
+} PianoKeyboardParams;
+
 void sequencer_init(Sequencer* seq) {
     memset(seq, 0, sizeof(Sequencer));
     seq->loop_enabled = true;
@@ -356,9 +369,180 @@ typedef struct {
     int fx_delay_enabled;
     int fx_reverb_enabled;
     int arp_enabled;
+
+    // Custom knob states (hardware panel UI)
+    UiKnobState knob_master_volume;
+    UiKnobState knob_tempo;
+    UiKnobState knob_filter_cutoff;
+    UiKnobState knob_filter_resonance;
+    UiKnobState knob_filter_env;
+    UiKnobState knob_env_attack;
+    UiKnobState knob_env_decay;
+    UiKnobState knob_env_sustain;
+    UiKnobState knob_env_release;
+    UiKnobState knob_osc1_detune;
+    UiKnobState knob_osc1_pwm;
+    UiKnobState knob_arp_rate;
+
+    double last_frame_time;
 } AppState;
 
 AppState g_app = {0};
+
+static void enqueue_param_float_msg(ParamId id, float value) {
+    ParamMsg msg = {0};
+    msg.id = (uint32_t)id;
+    msg.type = PARAM_FLOAT;
+    msg.value.f = value;
+    if (!param_queue_enqueue(&msg)) {
+        fprintf(stderr, "⚠️ Param queue full (float id %u)\n", msg.id);
+    }
+}
+
+static void enqueue_param_int_msg(ParamId id, int value) {
+    ParamMsg msg = {0};
+    msg.id = (uint32_t)id;
+    msg.type = PARAM_INT;
+    msg.value.i = value;
+    if (!param_queue_enqueue(&msg)) {
+        fprintf(stderr, "⚠️ Param queue full (int id %u)\n", msg.id);
+    }
+}
+
+static void ui_knobs_init(void) {
+    ui_knob_state_init(&g_app.knob_master_volume, 0.0f, 1.0f, g_app.master_volume);
+    ui_knob_state_init(&g_app.knob_tempo, 60.0f, 200.0f, g_app.tempo);
+    ui_knob_state_init(&g_app.knob_filter_cutoff, 20.0f, 20000.0f, g_app.filter_cutoff);
+    ui_knob_state_init(&g_app.knob_filter_resonance, 0.0f, 1.0f, g_app.filter_resonance);
+    ui_knob_state_init(&g_app.knob_filter_env, -1.0f, 1.0f, g_app.filter_env);
+    ui_knob_state_init(&g_app.knob_env_attack, 0.001f, 2.0f, g_app.env_attack);
+    ui_knob_state_init(&g_app.knob_env_decay, 0.001f, 2.0f, g_app.env_decay);
+    ui_knob_state_init(&g_app.knob_env_sustain, 0.0f, 1.0f, g_app.env_sustain);
+    ui_knob_state_init(&g_app.knob_env_release, 0.001f, 5.0f, g_app.env_release);
+    ui_knob_state_init(&g_app.knob_osc1_detune, -50.0f, 50.0f, g_app.osc1_detune);
+    ui_knob_state_init(&g_app.knob_osc1_pwm, 0.0f, 1.0f, g_app.osc1_pwm);
+    ui_knob_state_init(&g_app.knob_arp_rate, 1.0f, 8.0f, g_app.arp.rate > 0.0f ? g_app.arp.rate : 2.0f);
+}
+
+static struct nk_rect ui_panel_cell_rect(int col,
+                                         int row,
+                                         float cell_w,
+                                         float cell_h,
+                                         float gap_x,
+                                         float gap_y,
+                                         float padding) {
+    struct nk_rect rect = {0};
+    rect.x = padding + col * (cell_w + gap_x);
+    rect.y = padding + row * (cell_h + gap_y);
+    rect.w = cell_w;
+    rect.h = cell_h;
+    return rect;
+}
+
+static bool ui_note_is_active(int midi_note) {
+    if (g_app.mouse_note_playing == midi_note) {
+        return true;
+    }
+    for (size_t j = 0; j < KEYMAP_SIZE; ++j) {
+        if (g_keymap[j].midi_note == midi_note && g_app.keys_pressed[j]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void draw_piano_keyboard(struct nk_context* ctx,
+                                const PianoKeyboardParams* params) {
+    if (!ctx || !params) {
+        return;
+    }
+
+    const UiPalette* palette = ui_style_palette();
+    const UiMetrics* metrics = ui_style_metrics();
+    struct nk_command_buffer* canvas = nk_window_get_canvas(ctx);
+    const struct nk_rect bounds = params->bounds;
+    struct nk_rect background = bounds;
+    background.x += 2.0f;
+    background.w -= 4.0f;
+    ui_draw_panel_bezel(canvas, bounds, 6.0f);
+    ui_draw_panel_inset(canvas, background, 6.0f);
+
+    const int total_octaves = params->num_octaves > 0 ? params->num_octaves : 1;
+    const int total_white_keys = total_octaves * 7;
+    const float white_width = bounds.w / (float)total_white_keys;
+    const float white_gap = 1.5f;
+    const float white_height = fmaxf(metrics->keyboard_height - 12.0f, 80.0f);
+    const float black_width = white_width * 0.6f;
+    const float black_height = white_height * 0.62f;
+
+    static const int white_offsets[7] = {0, 2, 4, 5, 7, 9, 11};
+    static const int black_offsets[5] = {1, 3, 6, 8, 10};
+    static const int black_preceding_white[5] = {0, 1, 3, 4, 5};
+
+    struct nk_input* in = &ctx->input;
+    const nk_bool mouse_down = in->mouse.buttons[NK_BUTTON_LEFT].down;
+
+    // White keys (background layer)
+    for (int octave = 0; octave < total_octaves; ++octave) {
+        for (int i = 0; i < 7; ++i) {
+            int midi_note = params->start_note + octave * 12 + white_offsets[i];
+            float key_x = bounds.x + (float)(octave * 7 + i) * white_width + white_gap * 0.5f;
+            struct nk_rect key_rect = {
+                key_x,
+                bounds.y + 6.0f,
+                white_width - white_gap,
+                white_height
+            };
+
+            const bool active = ui_note_is_active(midi_note);
+            struct nk_color fill = active ? palette->key_pressed : palette->white_key;
+            nk_fill_rect(canvas, key_rect, 4.0f, fill);
+
+            const bool hovered = nk_input_is_mouse_hovering_rect(in, key_rect);
+            if (mouse_down && hovered && g_app.mouse_note_playing != midi_note) {
+                if (g_app.mouse_note_playing >= 0) {
+                    stop_note(g_app.mouse_note_playing, "mouse");
+                }
+                play_note(midi_note, "mouse");
+                g_app.mouse_note_playing = midi_note;
+            }
+        }
+    }
+
+    // Black keys (foreground layer)
+    for (int octave = 0; octave < total_octaves; ++octave) {
+        for (int i = 0; i < 5; ++i) {
+            int midi_note = params->start_note + octave * 12 + black_offsets[i];
+            float base_index = (float)(octave * 7 + black_preceding_white[i] + 1);
+            float key_x = bounds.x + base_index * white_width - black_width * 0.5f;
+            struct nk_rect key_rect = {
+                key_x,
+                bounds.y + 6.0f,
+                black_width,
+                black_height
+            };
+
+            const bool active = ui_note_is_active(midi_note);
+            struct nk_color fill = active ? palette->accent : palette->black_key;
+            nk_fill_rect(canvas, key_rect, 3.0f, fill);
+
+            const bool hovered = nk_input_is_mouse_hovering_rect(in, key_rect);
+            if (mouse_down && hovered && g_app.mouse_note_playing != midi_note) {
+                if (g_app.mouse_note_playing >= 0) {
+                    stop_note(g_app.mouse_note_playing, "mouse");
+                }
+                play_note(midi_note, "mouse");
+                g_app.mouse_note_playing = midi_note;
+            }
+        }
+    }
+
+    // Mouse release handling for any key
+    if (!mouse_down && g_app.mouse_note_playing >= 0) {
+        stop_note(g_app.mouse_note_playing, "mouse");
+        g_app.mouse_note_playing = -1;
+    }
+}
 
 // ============================================================================
 // AUDIO CALLBACK
@@ -522,430 +706,420 @@ void error_callback(int error, const char* description) {
 // ============================================================================
 
 void draw_gui(struct nk_context *ctx) {
-    const int width = 1400;
-    const int height = 850;
-    
-    // Main window
-    if (nk_begin(ctx, "Professional Synthesizer", nk_rect(0, 0, width, height),
-                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR)) {
-        
-        // Header with tabs and info
-        nk_layout_row_begin(ctx, NK_STATIC, 35, 6);
-        nk_layout_row_push(ctx, 120);
-        if (nk_button_label(ctx, g_app.active_tab == 0 ? "▶ SYNTH" : "SYNTH")) g_app.active_tab = 0;
-        nk_layout_row_push(ctx, 120);
-        if (nk_button_label(ctx, g_app.active_tab == 1 ? "▶ FX RACK" : "FX RACK")) g_app.active_tab = 1;
-        nk_layout_row_push(ctx, 120);
-        if (nk_button_label(ctx, g_app.active_tab == 2 ? "▶ ARP/SEQ" : "ARP/SEQ")) g_app.active_tab = 2;
-        nk_layout_row_push(ctx, 120);
-        if (nk_button_label(ctx, g_app.active_tab == 3 ? "▶ PRESETS" : "PRESETS")) g_app.active_tab = 3;
-        nk_layout_row_push(ctx, 200);
-        char info[64];
-        snprintf(info, sizeof(info), "🎵 %d/%d voices | %.0f BPM", 
-                 g_app.synth.num_active_voices, MAX_VOICES, g_app.tempo);
-        nk_label(ctx, info, NK_TEXT_CENTERED);
-        nk_layout_row_push(ctx, 150);
-        char time_info[32];
+    const UiMetrics* metrics = ui_style_metrics();
+    const float width = 1500.0f;
+    const float height = 920.0f;
+    const float column_gap = metrics->column_gap * 1.5f;
+    const nk_flags window_flags = NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR;
+
+    if (nk_begin(ctx, "Professional Synthesizer", nk_rect(0, 0, width, height), window_flags)) {
+        struct nk_rect region = nk_window_get_content_region(ctx);
+        const float column_width = (region.w - 2.0f * column_gap) / 3.0f;
+
+        if (column_width < 240.0f) {
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Increase the window width to use the expanded console layout.", NK_TEXT_CENTERED);
+            nk_end(ctx);
+            return;
+        }
+
+        nk_layout_row_begin(ctx, NK_STATIC, 52, 4);
+        nk_layout_row_push(ctx, region.w * 0.34f);
+        nk_label(ctx, "PROFESSIONAL SYNTHESIZER", NK_TEXT_LEFT);
+
+        nk_layout_row_push(ctx, region.w * 0.20f);
+        char voice_info[64];
+        snprintf(voice_info, sizeof(voice_info), "%d / %d voices", g_app.synth.num_active_voices, MAX_VOICES);
+        nk_label(ctx, voice_info, NK_TEXT_CENTERED);
+
+        nk_layout_row_push(ctx, region.w * 0.22f);
+        char tempo_info[64];
+        snprintf(tempo_info, sizeof(tempo_info), "Tempo %.1f BPM", g_app.tempo);
+        nk_label(ctx, tempo_info, NK_TEXT_CENTERED);
+
+        nk_layout_row_push(ctx, region.w * 0.20f);
         int minutes = (int)(g_app.current_time / 60.0);
-        int seconds = (int)g_app.current_time % 60;
-        snprintf(time_info, sizeof(time_info), "%s %02d:%02d", 
-                 g_app.playing ? "▶" : "⏸", minutes, seconds);
+        int seconds = (int)fmod(g_app.current_time, 60.0);
+        char time_info[32];
+        snprintf(time_info, sizeof(time_info), "%s %02d:%02d", g_app.playing ? "▶" : "⏸", minutes, seconds);
         nk_label(ctx, time_info, NK_TEXT_RIGHT);
         nk_layout_row_end(ctx);
-        
-        nk_layout_row_dynamic(ctx, 3, 1);
-        nk_spacing(ctx, 1);
-        
-        // Tab content
-        if (g_app.active_tab == 0) {
-            // SYNTH TAB - Multi-column layout
-            nk_layout_row_begin(ctx, NK_STATIC, 550, 3);
-            
-            // LEFT COLUMN - OSCILLATORS
-            nk_layout_row_push(ctx, 450);
-            if (nk_group_begin(ctx, "Oscillators", NK_WINDOW_BORDER | NK_WINDOW_TITLE)) {
-                nk_layout_row_dynamic(ctx, 20, 1);
-                nk_label(ctx, "═══ OSCILLATOR 1 ═══", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Waveform:", NK_TEXT_LEFT);
-                static const char *waves[] = {"Sine", "Saw", "Square", "Tri", "Noise"};
-                int wave_idx = (int)g_app.osc1_wave;
-                wave_idx = nk_combo(ctx, waves, 5, wave_idx, 25, nk_vec2(150, 200));
-                g_app.osc1_wave = (WaveformType)wave_idx;
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Detune (cents):", NK_TEXT_LEFT);
-                nk_slider_float(ctx, -50.0f, &g_app.osc1_detune, 50.0f, 1.0f);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Unison Voices:", NK_TEXT_LEFT);
-                nk_slider_int(ctx, 1, &g_app.osc1_unison, 5, 1);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Pulse Width:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.0f, &g_app.osc1_pwm, 1.0f, 0.01f);
-            
-                // Apply to voices
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].osc1.waveform = g_app.osc1_wave;
-                    g_app.synth.voices[i].osc1.detune_cents = g_app.osc1_detune;
-                    g_app.synth.voices[i].osc1.unison_voices = g_app.osc1_unison;
-                    g_app.synth.voices[i].osc1.pulse_width = g_app.osc1_pwm;
-                }
-                
-                nk_layout_row_dynamic(ctx, 10, 1);
-                nk_spacing(ctx, 1);
-                
-                nk_layout_row_dynamic(ctx, 20, 1);
-                nk_label(ctx, "═══ FILTER ═══", NK_TEXT_CENTERED);
-            
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Cutoff:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 20.0f, &g_app.filter_cutoff, 20000.0f, 10.0f);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Resonance:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.0f, &g_app.filter_resonance, 1.0f, 0.01f);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Mode:", NK_TEXT_LEFT);
-                static const char *fmodes[] = {"LP", "HP", "BP", "Notch", "AP"};
-                int fmode_idx = (int)g_app.filter_mode;
-                fmode_idx = nk_combo(ctx, fmodes, 5, fmode_idx, 25, nk_vec2(100, 200));
-                g_app.filter_mode = (FilterMode)fmode_idx;
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Env Amount:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, -1.0f, &g_app.filter_env, 1.0f, 0.01f);
-                
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].filter.cutoff = g_app.filter_cutoff;
-                    g_app.synth.voices[i].filter.resonance = g_app.filter_resonance;
-                    g_app.synth.voices[i].filter.mode = g_app.filter_mode;
-                    g_app.synth.voices[i].filter.env_amount = g_app.filter_env;
-                }
-                
-                nk_layout_row_dynamic(ctx, 10, 1);
-                nk_spacing(ctx, 1);
-                
-                nk_layout_row_dynamic(ctx, 20, 1);
-                nk_label(ctx, "═══ ENVELOPE ═══", NK_TEXT_CENTERED);
-            
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Attack:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.001f, &g_app.env_attack, 2.0f, 0.001f);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Decay:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.001f, &g_app.env_decay, 2.0f, 0.001f);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Sustain:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.0f, &g_app.env_sustain, 1.0f, 0.01f);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Release:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.001f, &g_app.env_release, 5.0f, 0.001f);
-                
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    g_app.synth.voices[i].env_amp.attack = g_app.env_attack;
-                    g_app.synth.voices[i].env_amp.decay = g_app.env_decay;
-                    g_app.synth.voices[i].env_amp.sustain = g_app.env_sustain;
-                    g_app.synth.voices[i].env_amp.release = g_app.env_release;
-                }
-                
-                nk_group_end(ctx);
-            }
-            
-            // MIDDLE COLUMN - LFOs & MODULATION
-            nk_layout_row_push(ctx, 450);
-            if (nk_group_begin(ctx, "Modulation", NK_WINDOW_BORDER | NK_WINDOW_TITLE)) {
-                nk_layout_row_dynamic(ctx, 20, 1);
-                nk_label(ctx, "═══ LFO 1 ═══", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Rate:", NK_TEXT_LEFT);
-                float lfo_rate = g_app.synth.lfos[0].rate;
-                nk_slider_float(ctx, 0.01f, &lfo_rate, 20.0f, 0.01f);
-                g_app.synth.lfos[0].rate = lfo_rate;
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Waveform:", NK_TEXT_LEFT);
-                static const char *lfo_waves[] = {"Sine", "Saw", "Square", "Tri", "S&H"};
-                int lfo_wave = (int)g_app.synth.lfos[0].waveform;
-                lfo_wave = nk_combo(ctx, lfo_waves, 5, lfo_wave, 25, nk_vec2(150, 200));
-                g_app.synth.lfos[0].waveform = (WaveformType)lfo_wave;
-                
-                nk_layout_row_dynamic(ctx, 10, 1);
-                nk_spacing(ctx, 1);
-                
-                nk_layout_row_dynamic(ctx, 20, 1);
-                nk_label(ctx, "═══ MASTER ═══", NK_TEXT_CENTERED);
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Volume:", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 0.0f, &g_app.master_volume, 1.0f, 0.01f);
-                g_app.synth.master_volume = g_app.master_volume;
-                
-                nk_layout_row_dynamic(ctx, 25, 2);
-                nk_label(ctx, "Tempo (BPM):", NK_TEXT_LEFT);
-                nk_slider_float(ctx, 60.0f, &g_app.tempo, 200.0f, 1.0f);
-                synth_set_tempo(&g_app.synth, g_app.tempo);
-                
-                nk_group_end(ctx);
-            }
-            
-            // RIGHT COLUMN - METERS
-            nk_layout_row_push(ctx, 450);
-            if (nk_group_begin(ctx, "Meters", NK_WINDOW_BORDER | NK_WINDOW_TITLE)) {
-                nk_layout_row_dynamic(ctx, 20, 1);
-                nk_label(ctx, "═══ VOICE ACTIVITY ═══", NK_TEXT_CENTERED);
-                
-                // Voice meters
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    nk_layout_row_begin(ctx, NK_STATIC, 20, 3);
-                    nk_layout_row_push(ctx, 50);
-                    char voice_label[16];
-                    snprintf(voice_label, sizeof(voice_label), "V%d", i + 1);
-                    nk_label(ctx, voice_label, NK_TEXT_LEFT);
-                    
-                    nk_layout_row_push(ctx, 300);
-                    float voice_level = 0.0f;
-                    if (g_app.synth.voices[i].state != VOICE_OFF) {
-                        voice_level = g_app.synth.voices[i].env_amp.current_level;
-                    }
-                    struct nk_color bar_color = voice_level > 0.01f ? 
-                        nk_rgb(50, 200, 100) : nk_rgb(40, 40, 50);
-                    nk_size progress_val = (nk_size)(voice_level * 100);
-                    nk_progress(ctx, &progress_val, 100, NK_FIXED);
-                    
-                    nk_layout_row_push(ctx, 50);
-                    if (g_app.synth.voices[i].state != VOICE_OFF) {
-                        snprintf(voice_label, sizeof(voice_label), "%d", g_app.synth.voices[i].midi_note);
-                        nk_label(ctx, voice_label, NK_TEXT_RIGHT);
-                    }
-                    nk_layout_row_end(ctx);
-                }
-                
-                nk_group_end(ctx);
-            }
-            
-            nk_layout_row_end(ctx);
-            
-        } else if (g_app.active_tab == 1) {
-            // FX TAB
-            nk_layout_row_dynamic(ctx, 20, 1);
-            nk_label(ctx, "═══ DISTORTION ═══", NK_TEXT_CENTERED);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Enable:", NK_TEXT_LEFT);
-            nk_checkbox_label(ctx, "", &g_app.fx_dist_enabled);
-            g_app.fx.distortion.enabled = g_app.fx_dist_enabled;
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Drive:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.0f, &g_app.fx.distortion.drive, 10.0f, 0.1f);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.0f, &g_app.fx.distortion.mix, 1.0f, 0.01f);
-            
-            nk_layout_row_dynamic(ctx, 10, 1);
-            nk_spacing(ctx, 1);
-            
-            nk_layout_row_dynamic(ctx, 20, 1);
-            nk_label(ctx, "═══ DELAY ═══", NK_TEXT_CENTERED);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Enable:", NK_TEXT_LEFT);
-            nk_checkbox_label(ctx, "", &g_app.fx_delay_enabled);
-            g_app.fx.delay.enabled = g_app.fx_delay_enabled;
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Time (ms):", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 100.0f, &g_app.fx.delay.time_ms, 2000.0f, 10.0f);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Feedback:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.0f, &g_app.fx.delay.feedback, 0.95f, 0.01f);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.0f, &g_app.fx.delay.mix, 1.0f, 0.01f);
-            
-            nk_layout_row_dynamic(ctx, 10, 1);
-            nk_spacing(ctx, 1);
-            
-            nk_layout_row_dynamic(ctx, 20, 1);
-            nk_label(ctx, "═══ REVERB ═══", NK_TEXT_CENTERED);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Enable:", NK_TEXT_LEFT);
-            nk_checkbox_label(ctx, "", &g_app.fx_reverb_enabled);
-            g_app.fx.reverb.enabled = g_app.fx_reverb_enabled;
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Size:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.0f, &g_app.fx.reverb.size, 1.0f, 0.01f);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Damping:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.0f, &g_app.fx.reverb.damping, 1.0f, 0.01f);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Mix:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.0f, &g_app.fx.reverb.mix, 1.0f, 0.01f);
-            
-        } else if (g_app.active_tab == 2) {
-            // ARP/SEQ TAB
-            nk_layout_row_dynamic(ctx, 20, 1);
-            nk_label(ctx, "═══ ARPEGGIATOR ═══", NK_TEXT_CENTERED);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Enable:", NK_TEXT_LEFT);
-            nk_checkbox_label(ctx, "", &g_app.arp_enabled);
+
+        nk_layout_row_begin(ctx, NK_STATIC, 40, 3);
+        nk_layout_row_push(ctx, region.w * 0.28f);
+        if (nk_button_label(ctx, g_app.playing ? "⏹ Stop Transport" : "▶ Start Transport")) {
+            g_app.playing = !g_app.playing;
+        }
+
+    nk_layout_row_push(ctx, region.w * 0.44f);
+    nk_size voice_meter = (nk_size)g_app.synth.num_active_voices;
+    nk_progress(ctx, &voice_meter, MAX_VOICES, nk_false);
+
+        nk_layout_row_push(ctx, region.w * 0.22f);
+        int previous_arp_enabled = g_app.arp_enabled;
+        nk_checkbox_label(ctx, "Arp Enabled", &g_app.arp_enabled);
+        if (previous_arp_enabled != g_app.arp_enabled) {
             g_app.arp.enabled = g_app.arp_enabled;
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Mode:", NK_TEXT_LEFT);
-            static const char *arp_modes[] = {"Off", "Up", "Down", "Up-Down", "Random"};
-            int arp_mode = (int)g_app.arp.mode;
-            arp_mode = nk_combo(ctx, arp_modes, 5, arp_mode, 25, nk_vec2(150, 200));
-            g_app.arp.mode = (ArpMode)arp_mode;
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Rate (steps/beat):", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 1.0f, &g_app.arp.rate, 8.0f, 0.5f);
-            
-            nk_layout_row_dynamic(ctx, 25, 2);
-            nk_label(ctx, "Gate:", NK_TEXT_LEFT);
-            nk_slider_float(ctx, 0.1f, &g_app.arp.gate, 1.0f, 0.05f);
-            
-            nk_layout_row_dynamic(ctx, 30, 1);
-            char arp_info[256];
-            snprintf(arp_info, sizeof(arp_info), 
-                    "Held notes: %d | Current step: %d", 
-                    g_app.arp.num_held, g_app.arp.current_step);
-            nk_label(ctx, arp_info, NK_TEXT_CENTERED);
-            
-        } else if (g_app.active_tab == 3) {
-            // PRESETS TAB
-            nk_layout_row_dynamic(ctx, 20, 1);
-            nk_label(ctx, "═══ PRESETS ═══", NK_TEXT_CENTERED);
-            
-            nk_layout_row_dynamic(ctx, 30, 3);
-            if (nk_button_label(ctx, "Init Sound")) {
-                // Reset to default
-                printf("🔄 Reset to init sound\n");
-            }
-            if (nk_button_label(ctx, "Save Preset")) {
-                printf("💾 Save preset (TODO: file dialog)\n");
-            }
-            if (nk_button_label(ctx, "Load Preset")) {
-                printf("📂 Load preset (TODO: file dialog)\n");
-            }
-            
-            nk_layout_row_dynamic(ctx, 200, 1);
-            nk_label(ctx, "Preset browser will go here\n(Factory & User presets)", NK_TEXT_CENTERED);
-        }
-        
-        // Piano Keyboard Display
-        nk_layout_row_dynamic(ctx, 5, 1);
-        nk_spacing(ctx, 1);
-        
-        nk_layout_row_dynamic(ctx, 20, 1);
-        nk_label(ctx, "═══════════════ PIANO KEYBOARD ═══════════════", NK_TEXT_CENTERED);
-        
-        // Draw realistic piano keyboard (2 octaves: C3-C5)
-        // White keys first (background layer)
-        nk_layout_row_static(ctx, 100, 40, 29);
-        
-        // C3 to C5 = MIDI 48-72 (25 white keys)
-        const int white_keys[] = {48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 71, 72};
-        const char* white_labels[] = {"C3", "D3", "E3", "F3", "G3", "A3", "B3", "C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5"};
-        
-        for (int i = 0; i < 15; i++) {
-            int midi_note = white_keys[i];
-            bool is_pressed = false;
-            
-            // Check if this note is currently pressed
-            for (size_t j = 0; j < KEYMAP_SIZE; j++) {
-                if (g_keymap[j].midi_note == midi_note && g_app.keys_pressed[j]) {
-                    is_pressed = true;
-                    break;
-                }
-            }
-            
-            struct nk_color color = is_pressed ? nk_rgb(100, 220, 120) : nk_rgb(245, 245, 250);
-            struct nk_style_button button_style = ctx->style.button;
-            button_style.normal.data.color = color;
-            button_style.hover.data.color = nk_rgb(220, 240, 220);
-            button_style.active.data.color = nk_rgb(100, 220, 120);
-            
-            // Check if button is being clicked
-            nk_bool clicked = nk_button_label_styled(ctx, &button_style, white_labels[i]);
-            
-            if (clicked && g_app.mouse_note_playing != midi_note) {
-                // Start playing this note
-                if (g_app.mouse_note_playing >= 0) {
-                    // Stop previous mouse note
-                    synth_note_off(&g_app.synth, g_app.mouse_note_playing);
-                }
-                play_note(midi_note, white_labels[i]);
-                g_app.mouse_note_playing = midi_note;
-            }
-        }
-        
-        // Black keys (overlay layer) - positioned between white keys
-        nk_layout_row_begin(ctx, NK_STATIC, 60, 10);
-        const int black_keys[] = {49, 51, 54, 56, 58, 61, 63, 66, 68, 70};
-        const char* black_labels[] = {"C#3", "D#3", "F#3", "G#3", "A#3", "C#4", "D#4", "F#4", "G#4", "A#4"};
-        const int black_positions[] = {30, 70, 150, 190, 230, 350, 390, 470, 510, 550};
-        
-        for (int i = 0; i < 10; i++) {
-            nk_layout_row_push(ctx, 28);
-            int midi_note = black_keys[i];
-            bool is_pressed = false;
-            
-            // Check if pressed
-            for (size_t j = 0; j < KEYMAP_SIZE; j++) {
-                if (g_keymap[j].midi_note == midi_note && g_app.keys_pressed[j]) {
-                    is_pressed = true;
-                    break;
-                }
-            }
-            
-            struct nk_color color = is_pressed ? nk_rgb(80, 200, 100) : nk_rgb(25, 25, 30);
-            struct nk_style_button button_style = ctx->style.button;
-            button_style.normal.data.color = color;
-            button_style.hover.data.color = nk_rgb(60, 60, 70);
-            button_style.active.data.color = nk_rgb(80, 200, 100);
-            button_style.text_normal = nk_rgb(255, 255, 255);
-            button_style.text_hover = nk_rgb(255, 255, 255);
-            button_style.text_active = nk_rgb(255, 255, 255);
-            
-            // Check if button is being clicked
-            nk_bool clicked = nk_button_label_styled(ctx, &button_style, black_labels[i]);
-            
-            if (clicked && g_app.mouse_note_playing != midi_note) {
-                // Start playing this note
-                if (g_app.mouse_note_playing >= 0) {
-                    // Stop previous mouse note
-                    synth_note_off(&g_app.synth, g_app.mouse_note_playing);
-                }
-                play_note(midi_note, black_labels[i]);
-                g_app.mouse_note_playing = midi_note;
-            }
+            enqueue_param_int_msg(PARAM_ARP_ENABLED, g_app.arp_enabled);
+        } else {
+            g_app.arp.enabled = g_app.arp_enabled != 0;
         }
         nk_layout_row_end(ctx);
-        
-        // Keyboard mapping info
-        nk_layout_row_dynamic(ctx, 18, 1);
-        nk_label(ctx, "Computer Keyboard: Z-M (bottom) = C3-B3  |  Q-I (middle) = C3-C5  |  S D G H J (sharps)", NK_TEXT_CENTERED);
-        
-        nk_layout_row_dynamic(ctx, 18, 1);
-        nk_label(ctx, "🖱️ Click piano keys to play  |  ⌨️ Use computer keyboard  |  SPACE=Play/Stop  |  ESC=Panic", NK_TEXT_CENTERED);
+
+        nk_layout_row_dynamic(ctx, 6, 1);
+        nk_spacing(ctx, 1);
+
+        nk_flags panel_flags = NK_WINDOW_BORDER | NK_WINDOW_NO_SCROLLBAR;
+
+        nk_layout_row_begin(ctx, NK_STATIC, 360, 3);
+
+        nk_layout_row_push(ctx, column_width);
+        if (nk_group_begin_titled(ctx, "PANEL_OSC", "Oscillator Deck", panel_flags)) {
+            nk_layout_row_dynamic(ctx, 28, 2);
+            nk_label(ctx, "Waveform", NK_TEXT_LEFT);
+            static const char *waves[] = {"Sine", "Saw", "Square", "Tri", "Noise"};
+            int wave_idx = (int)g_app.osc1_wave;
+            int selected_wave = nk_combo(ctx, waves, 5, wave_idx, 28, nk_vec2(160, 200));
+            if (selected_wave != wave_idx) {
+                g_app.osc1_wave = (WaveformType)selected_wave;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].osc1.waveform = g_app.osc1_wave;
+                }
+                enqueue_param_int_msg(PARAM_OSC1_WAVE, selected_wave);
+            }
+
+            nk_layout_row_dynamic(ctx, 28, 2);
+            nk_label(ctx, "Unison Voices", NK_TEXT_LEFT);
+            int prev_unison = g_app.osc1_unison;
+            nk_slider_int(ctx, 1, &g_app.osc1_unison, 5, 1);
+            if (prev_unison != g_app.osc1_unison) {
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].osc1.unison_voices = g_app.osc1_unison;
+                }
+            }
+
+            const float knob_width = fminf(column_width * 0.45f, 140.0f);
+            nk_layout_row_begin(ctx, NK_STATIC, 150, 2);
+            nk_layout_row_push(ctx, knob_width);
+            UiKnobConfig detune_cfg = {.label = "DETUNE", .unit = "¢", .snap_increment = 1.0f};
+            if (ui_knob_render(ctx, &g_app.knob_osc1_detune, &detune_cfg)) {
+                g_app.osc1_detune = g_app.knob_osc1_detune.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].osc1.detune_cents = g_app.osc1_detune;
+                }
+                enqueue_param_float_msg(PARAM_OSC1_FINE, g_app.osc1_detune);
+            }
+
+            nk_layout_row_push(ctx, knob_width);
+            UiKnobConfig pwm_cfg = {.label = "PULSE", .unit = ""};
+            if (ui_knob_render(ctx, &g_app.knob_osc1_pwm, &pwm_cfg)) {
+                g_app.osc1_pwm = g_app.knob_osc1_pwm.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].osc1.pulse_width = g_app.osc1_pwm;
+                }
+                enqueue_param_float_msg(PARAM_OSC1_PWM, g_app.osc1_pwm);
+            }
+            nk_layout_row_end(ctx);
+
+            nk_group_end(ctx);
+        }
+
+        nk_layout_row_push(ctx, column_width);
+        if (nk_group_begin_titled(ctx, "PANEL_FILTER", "Filter & Envelope", panel_flags)) {
+            nk_layout_row_dynamic(ctx, 28, 2);
+            nk_label(ctx, "Filter Mode", NK_TEXT_LEFT);
+            static const char *filter_modes[] = {"LP", "HP", "BP", "Notch", "AP"};
+            int mode_idx = (int)g_app.filter_mode;
+            int new_mode = nk_combo(ctx, filter_modes, 5, mode_idx, 28, nk_vec2(120, 200));
+            if (new_mode != mode_idx) {
+                g_app.filter_mode = (FilterMode)new_mode;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].filter.mode = g_app.filter_mode;
+                }
+                enqueue_param_int_msg(PARAM_FILTER_MODE, new_mode);
+            }
+
+            nk_layout_row_begin(ctx, NK_STATIC, 150, 3);
+            const float filter_knob_width = fminf(column_width * 0.32f, 120.0f);
+
+            nk_layout_row_push(ctx, filter_knob_width);
+            UiKnobConfig cutoff_cfg = {.label = "CUTOFF", .unit = "Hz"};
+            if (ui_knob_render(ctx, &g_app.knob_filter_cutoff, &cutoff_cfg)) {
+                g_app.filter_cutoff = g_app.knob_filter_cutoff.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].filter.cutoff = g_app.filter_cutoff;
+                }
+                enqueue_param_float_msg(PARAM_FILTER_CUTOFF, g_app.filter_cutoff);
+            }
+
+            nk_layout_row_push(ctx, filter_knob_width);
+            UiKnobConfig resonance_cfg = {.label = "RESONANCE", .unit = ""};
+            if (ui_knob_render(ctx, &g_app.knob_filter_resonance, &resonance_cfg)) {
+                g_app.filter_resonance = g_app.knob_filter_resonance.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].filter.resonance = g_app.filter_resonance;
+                }
+                enqueue_param_float_msg(PARAM_FILTER_RESONANCE, g_app.filter_resonance);
+            }
+
+            nk_layout_row_push(ctx, filter_knob_width);
+            UiKnobConfig env_cfg = {.label = "ENV AMT", .unit = ""};
+            if (ui_knob_render(ctx, &g_app.knob_filter_env, &env_cfg)) {
+                g_app.filter_env = g_app.knob_filter_env.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].filter.env_amount = g_app.filter_env;
+                }
+                enqueue_param_float_msg(PARAM_FILTER_ENV_AMOUNT, g_app.filter_env);
+            }
+            nk_layout_row_end(ctx);
+
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Amp Envelope", NK_TEXT_LEFT);
+
+            nk_layout_row_begin(ctx, NK_STATIC, 150, 4);
+            const float env_knob_width = fminf(column_width * 0.24f, 100.0f);
+
+            nk_layout_row_push(ctx, env_knob_width);
+            UiKnobConfig attack_cfg = {.label = "ATTACK", .unit = "s"};
+            if (ui_knob_render(ctx, &g_app.knob_env_attack, &attack_cfg)) {
+                g_app.env_attack = g_app.knob_env_attack.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].env_amp.attack = g_app.env_attack;
+                }
+                enqueue_param_float_msg(PARAM_ENV_ATTACK, g_app.env_attack);
+            }
+
+            nk_layout_row_push(ctx, env_knob_width);
+            UiKnobConfig decay_cfg = {.label = "DECAY", .unit = "s"};
+            if (ui_knob_render(ctx, &g_app.knob_env_decay, &decay_cfg)) {
+                g_app.env_decay = g_app.knob_env_decay.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].env_amp.decay = g_app.env_decay;
+                }
+                enqueue_param_float_msg(PARAM_ENV_DECAY, g_app.env_decay);
+            }
+
+            nk_layout_row_push(ctx, env_knob_width);
+            UiKnobConfig sustain_cfg = {.label = "SUSTAIN", .unit = ""};
+            if (ui_knob_render(ctx, &g_app.knob_env_sustain, &sustain_cfg)) {
+                g_app.env_sustain = g_app.knob_env_sustain.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].env_amp.sustain = g_app.env_sustain;
+                }
+                enqueue_param_float_msg(PARAM_ENV_SUSTAIN, g_app.env_sustain);
+            }
+
+            nk_layout_row_push(ctx, env_knob_width);
+            UiKnobConfig release_cfg = {.label = "RELEASE", .unit = "s"};
+            if (ui_knob_render(ctx, &g_app.knob_env_release, &release_cfg)) {
+                g_app.env_release = g_app.knob_env_release.value;
+                for (int i = 0; i < MAX_VOICES; ++i) {
+                    g_app.synth.voices[i].env_amp.release = g_app.env_release;
+                }
+                enqueue_param_float_msg(PARAM_ENV_RELEASE, g_app.env_release);
+            }
+            nk_layout_row_end(ctx);
+
+            nk_group_end(ctx);
+        }
+
+        nk_layout_row_push(ctx, column_width);
+        if (nk_group_begin_titled(ctx, "PANEL_MASTER", "Master / FX / Arp", panel_flags)) {
+            nk_layout_row_begin(ctx, NK_STATIC, 150, 2);
+            const float master_knob_width = fminf(column_width * 0.45f, 140.0f);
+            nk_layout_row_push(ctx, master_knob_width);
+            UiKnobConfig master_cfg = {.label = "MASTER", .unit = ""};
+            if (ui_knob_render(ctx, &g_app.knob_master_volume, &master_cfg)) {
+                g_app.master_volume = g_app.knob_master_volume.value;
+                g_app.synth.master_volume = g_app.master_volume;
+                enqueue_param_float_msg(PARAM_MASTER_VOLUME, g_app.master_volume);
+            }
+
+            nk_layout_row_push(ctx, master_knob_width);
+            UiKnobConfig tempo_cfg = {.label = "TEMPO", .unit = "BPM"};
+            if (ui_knob_render(ctx, &g_app.knob_tempo, &tempo_cfg)) {
+                g_app.tempo = g_app.knob_tempo.value;
+                synth_set_tempo(&g_app.synth, g_app.tempo);
+                enqueue_param_float_msg(PARAM_TEMPO, g_app.tempo);
+            }
+            nk_layout_row_end(ctx);
+
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Effects", NK_TEXT_LEFT);
+
+            int prev_dist_enabled = g_app.fx_dist_enabled;
+            int prev_delay_enabled = g_app.fx_delay_enabled;
+            int prev_reverb_enabled = g_app.fx_reverb_enabled;
+
+            nk_layout_row_dynamic(ctx, 26, 3);
+            nk_checkbox_label(ctx, "Dist", &g_app.fx_dist_enabled);
+            nk_checkbox_label(ctx, "Delay", &g_app.fx_delay_enabled);
+            nk_checkbox_label(ctx, "Reverb", &g_app.fx_reverb_enabled);
+
+            if (prev_dist_enabled != g_app.fx_dist_enabled) {
+                enqueue_param_int_msg(PARAM_FX_DISTORTION_ENABLED, g_app.fx_dist_enabled);
+            }
+            if (prev_delay_enabled != g_app.fx_delay_enabled) {
+                enqueue_param_int_msg(PARAM_FX_DELAY_ENABLED, g_app.fx_delay_enabled);
+            }
+            if (prev_reverb_enabled != g_app.fx_reverb_enabled) {
+                enqueue_param_int_msg(PARAM_FX_REVERB_ENABLED, g_app.fx_reverb_enabled);
+            }
+
+            g_app.fx.distortion.enabled = g_app.fx_dist_enabled;
+            g_app.fx.delay.enabled = g_app.fx_delay_enabled;
+            g_app.fx.reverb.enabled = g_app.fx_reverb_enabled;
+
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Distortion", NK_TEXT_LEFT);
+            if (nk_slider_float(ctx, 0.0f, &g_app.fx.distortion.drive, 10.0f, 0.1f)) {
+                enqueue_param_float_msg(PARAM_FX_DISTORTION_DRIVE, g_app.fx.distortion.drive);
+            }
+            if (nk_slider_float(ctx, 0.0f, &g_app.fx.distortion.mix, 1.0f, 0.01f)) {
+                enqueue_param_float_msg(PARAM_FX_DISTORTION_MIX, g_app.fx.distortion.mix);
+            }
+
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Delay", NK_TEXT_LEFT);
+            if (nk_slider_float(ctx, 100.0f, &g_app.fx.delay.time_ms, 2000.0f, 10.0f)) {
+                enqueue_param_float_msg(PARAM_FX_DELAY_TIME, g_app.fx.delay.time_ms);
+            }
+            if (nk_slider_float(ctx, 0.0f, &g_app.fx.delay.feedback, 0.95f, 0.01f)) {
+                enqueue_param_float_msg(PARAM_FX_DELAY_FEEDBACK, g_app.fx.delay.feedback);
+            }
+            if (nk_slider_float(ctx, 0.0f, &g_app.fx.delay.mix, 1.0f, 0.01f)) {
+                enqueue_param_float_msg(PARAM_FX_DELAY_MIX, g_app.fx.delay.mix);
+            }
+
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Reverb", NK_TEXT_LEFT);
+            if (nk_slider_float(ctx, 0.0f, &g_app.fx.reverb.size, 1.0f, 0.01f)) {
+                enqueue_param_float_msg(PARAM_FX_REVERB_SIZE, g_app.fx.reverb.size);
+            }
+            if (nk_slider_float(ctx, 0.0f, &g_app.fx.reverb.damping, 1.0f, 0.01f)) {
+                enqueue_param_float_msg(PARAM_FX_REVERB_DAMPING, g_app.fx.reverb.damping);
+            }
+            if (nk_slider_float(ctx, 0.0f, &g_app.fx.reverb.mix, 1.0f, 0.01f)) {
+                enqueue_param_float_msg(PARAM_FX_REVERB_MIX, g_app.fx.reverb.mix);
+            }
+
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Arpeggiator", NK_TEXT_LEFT);
+            nk_layout_row_dynamic(ctx, 28, 2);
+            nk_label(ctx, "Mode", NK_TEXT_LEFT);
+            static const char *arp_modes[] = {"Off", "Up", "Down", "Up+Down", "Random"};
+            int arp_mode = (int)g_app.arp.mode;
+            int new_arp_mode = nk_combo(ctx, arp_modes, 5, arp_mode, 28, nk_vec2(140, 200));
+            if (new_arp_mode != arp_mode) {
+                g_app.arp.mode = (ArpMode)new_arp_mode;
+                enqueue_param_int_msg(PARAM_ARP_MODE, new_arp_mode);
+            }
+
+            nk_layout_row_begin(ctx, NK_STATIC, 120, 1);
+            nk_layout_row_push(ctx, master_knob_width);
+            UiKnobConfig arp_rate_cfg = {.label = "RATE", .unit = "stp"};
+            if (ui_knob_render(ctx, &g_app.knob_arp_rate, &arp_rate_cfg)) {
+                g_app.arp.rate = g_app.knob_arp_rate.value;
+                enqueue_param_float_msg(PARAM_ARP_RATE, g_app.arp.rate);
+            }
+            nk_layout_row_end(ctx);
+
+            nk_layout_row_dynamic(ctx, 28, 2);
+            nk_label(ctx, "Gate", NK_TEXT_LEFT);
+            if (nk_slider_float(ctx, 0.1f, &g_app.arp.gate, 1.0f, 0.05f)) {
+                enqueue_param_float_msg(PARAM_ARP_GATE, g_app.arp.gate);
+            }
+
+            nk_group_end(ctx);
+        }
+
+        nk_layout_row_end(ctx);
+
+        nk_layout_row_dynamic(ctx, 8, 1);
+        nk_spacing(ctx, 1);
+
+        nk_layout_row_begin(ctx, NK_STATIC, 200, 2);
+        nk_layout_row_push(ctx, (region.w - column_gap) * 0.5f);
+        if (nk_group_begin_titled(ctx, "PANEL_PERF", "Performance Monitor", panel_flags)) {
+            nk_layout_row_dynamic(ctx, 26, 2);
+            nk_label(ctx, "Held notes", NK_TEXT_LEFT);
+            nk_label(ctx, "Mouse note", NK_TEXT_RIGHT);
+
+            nk_layout_row_dynamic(ctx, 26, 2);
+            char held_buf[64];
+            snprintf(held_buf, sizeof(held_buf), "%d active", g_app.arp.num_held);
+            nk_label(ctx, held_buf, NK_TEXT_LEFT);
+            if (g_app.mouse_note_playing >= 0) {
+                char mouse_buf[32];
+                snprintf(mouse_buf, sizeof(mouse_buf), "MIDI %d", g_app.mouse_note_playing);
+                nk_label(ctx, mouse_buf, NK_TEXT_RIGHT);
+            } else {
+                nk_label(ctx, "-", NK_TEXT_RIGHT);
+            }
+
+            nk_layout_row_dynamic(ctx, 32, 1);
+            if (nk_button_label(ctx, "Panic (All Notes Off)")) {
+                synth_all_notes_off(&g_app.synth);
+                memset(g_app.keys_pressed, 0, sizeof(g_app.keys_pressed));
+                g_app.mouse_note_playing = -1;
+                g_app.arp.num_held = 0;
+                enqueue_param_int_msg(PARAM_PANIC, 1);
+            }
+
+            nk_layout_row_dynamic(ctx, 24, 1);
+            nk_label(ctx, "Sequencer controls return in the next update.", NK_TEXT_CENTERED);
+            nk_group_end(ctx);
+        }
+
+        nk_layout_row_push(ctx, (region.w - column_gap) * 0.5f);
+        if (nk_group_begin_titled(ctx, "PANEL_VOICES", "Voice Activity", panel_flags)) {
+            for (int i = 0; i < MAX_VOICES; ++i) {
+                nk_layout_row_begin(ctx, NK_STATIC, 22, 3);
+                nk_layout_row_push(ctx, 40);
+                char label[8];
+                snprintf(label, sizeof(label), "V%d", i + 1);
+                nk_label(ctx, label, NK_TEXT_LEFT);
+
+                nk_layout_row_push(ctx, column_width * 0.35f);
+                float level = 0.0f;
+                if (g_app.synth.voices[i].state != VOICE_OFF) {
+                    level = g_app.synth.voices[i].env_amp.current_level;
+                }
+                nk_size bar = (nk_size)(level * 100.0f);
+                nk_progress(ctx, &bar, 100, nk_false);
+
+                nk_layout_row_push(ctx, 60);
+                if (g_app.synth.voices[i].state != VOICE_OFF) {
+                    snprintf(label, sizeof(label), "M%d", g_app.synth.voices[i].midi_note);
+                    nk_label(ctx, label, NK_TEXT_RIGHT);
+                } else {
+                    nk_label(ctx, "-", NK_TEXT_RIGHT);
+                }
+                nk_layout_row_end(ctx);
+            }
+            nk_group_end(ctx);
+        }
+        nk_layout_row_end(ctx);
+
+        nk_layout_row_dynamic(ctx, 12, 1);
+        nk_spacing(ctx, 1);
+
+        nk_layout_row_dynamic(ctx, metrics->keyboard_height + 30.0f, 1);
+        struct nk_rect keyboard_bounds;
+        if (nk_widget(&keyboard_bounds, ctx) != NK_WIDGET_INVALID) {
+            PianoKeyboardParams params = {
+                .bounds = nk_rect(keyboard_bounds.x + metrics->padding_lr,
+                                  keyboard_bounds.y + 4.0f,
+                                  keyboard_bounds.w - metrics->padding_lr * 2.0f,
+                                  keyboard_bounds.h - 8.0f),
+                .start_note = 48,
+                .num_octaves = 3
+            };
+            draw_piano_keyboard(ctx, &params);
+        }
+
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_label(ctx, "Mouse: click & drag keys • Keyboard: Z-M / Q-I • SPACE = Play/Stop • ESC = Panic", NK_TEXT_CENTERED);
     }
     nk_end(ctx);
 }
@@ -1022,6 +1196,7 @@ int main(void) {
     
     // Init arp
     arp_init(&g_app.arp);
+    ui_knobs_init();
     
     // Init mouse tracking
     g_app.mouse_note_playing = -1;
