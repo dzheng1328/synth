@@ -26,6 +26,10 @@ void ui_draw_small_label(struct nk_command_buffer* cmd,
                          const char* text,
                          enum nk_text_alignment align);
 
+void ui_draw_mod_meter(struct nk_command_buffer* cmd,
+                       struct nk_rect bounds,
+                       float amount);
+
 #ifdef __cplusplus
 }
 #endif

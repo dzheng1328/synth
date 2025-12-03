@@ -14,10 +14,6 @@
 #define GLFW_INCLUDE_NONE
 #endif
 
-#ifndef GLFW_INCLUDE_GLCOREARB
-#define GLFW_INCLUDE_GLCOREARB
-#endif
-
 #if defined(__APPLE__)
 #ifndef GL_SILENCE_DEPRECATION
 #define GL_SILENCE_DEPRECATION

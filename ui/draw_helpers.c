@@ -109,3 +109,48 @@ void ui_draw_small_label(struct nk_command_buffer* cmd,
     (void)align;
     nk_draw_text(cmd, bounds, text, (int)strlen(text), font, palette->panel_bg, palette->text);
 }
+
+void ui_draw_mod_meter(struct nk_command_buffer* cmd,
+                       struct nk_rect bounds,
+                       float amount) {
+    if (!cmd) {
+        return;
+    }
+    const UiPalette* palette = ui_style_palette();
+    const float clamped = amount < -1.0f ? -1.0f : (amount > 1.0f ? 1.0f : amount);
+
+    struct nk_rect outer = bounds;
+    nk_fill_rect(cmd, outer, 3.0f, palette->panel_bezel);
+
+    struct nk_rect inner = outer;
+    const float inset = 2.0f;
+    inner.x += inset;
+    inner.y += inset;
+    inner.w = inner.w > inset * 2.0f ? inner.w - inset * 2.0f : inner.w;
+    inner.h = inner.h > inset * 2.0f ? inner.h - inset * 2.0f : inner.h;
+    nk_fill_rect(cmd, inner, 2.0f, palette->panel_inset);
+
+    const float center = inner.x + inner.w * 0.5f;
+    const float half_width = inner.w * 0.5f;
+
+    if (clamped >= 0.0f) {
+        struct nk_rect positive = {
+            center,
+            inner.y,
+            half_width * clamped,
+            inner.h
+        };
+        nk_fill_rect(cmd, positive, 2.0f, palette->meter_positive);
+    } else {
+        const float span = half_width * -clamped;
+        struct nk_rect negative = {
+            center - span,
+            inner.y,
+            span,
+            inner.h
+        };
+        nk_fill_rect(cmd, negative, 2.0f, palette->meter_negative);
+    }
+
+    nk_stroke_line(cmd, center, inner.y, center, inner.y + inner.h, 1.0f, palette->border);
+}

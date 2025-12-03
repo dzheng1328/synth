@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(synth_complete C)
 
+include(FetchContent)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -26,27 +28,45 @@ set(SYNTH_COMPLETE_SOURCES
     ui/style.c
     ui/draw_helpers.c
     ui/knob_custom.c
+    third_party/glad/src/gl.c
     third_party/cjson/cJSON.c
 )
 
 add_executable(synth_complete_app ${SYNTH_COMPLETE_SOURCES})
 
-target_include_directories(synth_complete_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(synth_complete_app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glad/include
+)
+
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.3.9
+    FIND_PACKAGE_ARGS
+)
+
+FetchContent_MakeAvailable(glfw)
 
 if(APPLE)
-    target_link_libraries(synth_complete_app
+    target_link_libraries(synth_complete_app PRIVATE
+        glfw
         "-framework CoreAudio"
         "-framework AudioToolbox"
         "-framework OpenGL"
         "-framework Cocoa"
         "-framework IOKit"
-        glfw
         m
         pthread)
 elseif(UNIX)
-    target_link_libraries(synth_complete_app m pthread)
+    target_link_libraries(synth_complete_app PRIVATE glfw m pthread dl)
 elseif(WIN32)
-    target_link_libraries(synth_complete_app winmm)
+    target_link_libraries(synth_complete_app PRIVATE glfw opengl32 gdi32 shell32 winmm)
 endif()
 
 if(USE_UI_ASSETS)

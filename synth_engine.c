@@ -154,28 +154,24 @@ float osc_process(Oscillator* osc, float sample_rate, float fm_input) {
     // Unison processing
     if (osc->unison_voices > 1) {
         float unison_output = 0.0f;
-        
+        float center = (float)(osc->unison_voices - 1) * 0.5f;
+        float denom = center > 0.0f ? center : 1.0f;
+
         for (int i = 0; i < osc->unison_voices; i++) {
-            // Calculate detune for this voice
-            float detune_offset = 0.0f;
-            if (i > 0) {
-                float spread = ((float)i / (osc->unison_voices - 1)) - 0.5f; // -0.5 to 0.5
-                detune_offset = spread * osc->detune_cents * osc->unison_spread;
-            }
-            
+            float spread = ( (float)i - center ) / denom; // -1.0 to 1.0 symmetric
+            float detune_offset = spread * osc->detune_cents * osc->unison_spread;
+
             float voice_freq = base_freq * cents_to_ratio(detune_offset);
             float detune_ratio = voice_freq / fmaxf(base_freq, 0.0001f);
-            
-            // Calculate phase for this unison voice
-            float voice_phase = osc->phase * detune_ratio + (i * osc->phase_offset);
+
+            float phase_jitter = (float)i / (float)osc->unison_voices;
+            float voice_phase = osc->phase * detune_ratio + phase_jitter;
             voice_phase -= floorf(voice_phase);
-            
-            // Generate sample
+
             float pw = osc->pulse_width;
             unison_output += osc_generate_basic(osc, voice_phase, pw);
         }
-        
-        // Average the unison voices
+
         output = unison_output / osc->unison_voices;
     } else {
         // Single voice
@@ -236,6 +232,7 @@ void filter_update_coefficients(Filter* filter, float sample_rate, float cutoff,
 
     float freq = filter->cutoff_actual;
     filter->f = 2.0f * sinf(M_PI * freq / sample_rate);
+    filter->f = clamp(filter->f, 0.01f, 0.95f);
     filter->q = clamp(1.0f - filter->resonance_actual, 0.1f, 1.0f);
 }
 
@@ -813,7 +810,8 @@ bool synth_engine_apply_param(SynthEngine* synth, const ParamMsg* msg) {
             return true;
         }
         case PARAM_FILTER_CUTOFF: {
-            float cutoff = clamp(param_msg_get_float(msg), 20.0f, 20000.0f);
+            float max_cutoff = fminf(20000.0f, synth->sample_rate * 0.45f);
+            float cutoff = clamp(param_msg_get_float(msg), 20.0f, max_cutoff);
             synth->filter_cutoff = cutoff;
             for (int i = 0; i < MAX_VOICES; ++i) {
                 synth->voices[i].filter.cutoff = cutoff;

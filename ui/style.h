@@ -14,6 +14,7 @@ typedef struct UiPalette {
     struct nk_color knob_face;
     struct nk_color knob_highlight;
     struct nk_color accent;
+    struct nk_color accent_glow;
     struct nk_color led_off;
     struct nk_color led_on;
     struct nk_color white_key;
@@ -21,6 +22,12 @@ typedef struct UiPalette {
     struct nk_color key_pressed;
     struct nk_color text;
     struct nk_color border;
+    struct nk_color panel_header_top;
+    struct nk_color panel_header_bottom;
+    struct nk_color meter_positive;
+    struct nk_color meter_negative;
+    struct nk_color chip_bg;
+    struct nk_color chip_border;
 } UiPalette;
 
 const UiPalette* ui_style_palette(void);
